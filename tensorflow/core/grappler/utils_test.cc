@@ -14,13 +14,102 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/core/grappler/utils.h"
+#include "tensorflow/core/framework/node_def.pb.h"
+#include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/lib/core/threadpool.h"
+#include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/notification.h"
 #include "tensorflow/core/platform/test.h"
 
 namespace tensorflow {
 namespace grappler {
 namespace {
 
-class UtilsTest : public ::testing::Test {};
+class UtilsTest : public ::testing::Test {
+ protected:
+  NodeDef CreateConcatOffsetNode() const {
+    const string gdef_ascii = R"EOF(
+name: "gradients/InceptionV3/Mixed_7c/Branch_1/concat_v2_grad/ConcatOffset"
+op: "ConcatOffset"
+input: "InceptionV3/Mixed_7c/Branch_1/concat_v2/axis"
+input: "gradients/InceptionV3/Mixed_7c/Branch_1/concat_v2_grad/Shape"
+input: "gradients/InceptionV3/Mixed_7c/Branch_1/concat_v2_grad/Shape_1"
+attr {
+  key: "N"
+  value {
+    i: 2
+  }
+}
+    )EOF";
+    NodeDef node;
+    CHECK(protobuf::TextFormat::ParseFromString(gdef_ascii, &node));
+    return node;
+  }
+
+  NodeDef CreateDequeueNode() const {
+    const string gdef_ascii = R"EOF(
+name: "Train/TrainInput/input_producer_Dequeue"
+op: "QueueDequeueV2"
+input: "Train/TrainInput/input_producer"
+attr {
+  key: "component_types"
+  value {
+    list {
+      type: DT_INT32
+    }
+  }
+}
+attr {
+  key: "timeout_ms"
+  value {
+    i: -1
+  }
+}
+    )EOF";
+    NodeDef node;
+    CHECK(protobuf::TextFormat::ParseFromString(gdef_ascii, &node));
+    return node;
+  }
+
+  NodeDef CreateFusedBatchNormNode() const {
+    const string gdef_ascii = R"EOF(
+name: "InceptionV3/Conv2d_1a_3x3/BatchNorm/FusedBatchNorm"
+op: "FusedBatchNorm"
+input: "InceptionV3/Conv2d_1a_3x3/BatchNorm/FusedBatchNorm"
+input: "InceptionV3/Conv2d_1a_3x3/BatchNorm/gamma/read"
+input: "InceptionV3/Conv2d_1a_3x3/BatchNorm/beta/read"
+input: "InceptionV3/Conv2d_1a_3x3/BatchNorm/Const"
+input: "InceptionV3/Conv2d_1a_3x3/BatchNorm/Const_1"
+attr {
+  key: "T"
+  value {
+    type: DT_FLOAT
+  }
+}
+attr {
+  key: "data_format"
+  value {
+    s: "NHWC"
+  }
+}
+attr {
+  key: "epsilon"
+  value {
+    f: 0.001
+  }
+}
+attr {
+  key: "is_training"
+  value {
+    b: true
+  }
+}
+    )EOF";
+    NodeDef node;
+    CHECK(protobuf::TextFormat::ParseFromString(gdef_ascii, &node));
+    return node;
+  }
+};
 
 TEST_F(UtilsTest, NodeName) {
   EXPECT_EQ("abc", NodeName("abc"));
@@ -55,9 +144,41 @@ TEST_F(UtilsTest, NodePosition) {
 }
 
 TEST_F(UtilsTest, AddNodeNamePrefix) {
-  EXPECT_EQ("OPTIMIZED-abc", AddPrefixToNodeName("abc", "OPTIMIZED"));
-  EXPECT_EQ("^OPTIMIZED-abc", AddPrefixToNodeName("^abc", "OPTIMIZED"));
-  EXPECT_EQ("OPTIMIZED-", AddPrefixToNodeName("", "OPTIMIZED"));
+  EXPECT_EQ("OPTIMIZED/abc", AddPrefixToNodeName("abc", "OPTIMIZED"));
+  EXPECT_EQ("^OPTIMIZED/abc", AddPrefixToNodeName("^abc", "OPTIMIZED"));
+  EXPECT_EQ("OPTIMIZED/", AddPrefixToNodeName("", "OPTIMIZED"));
+}
+
+TEST_F(UtilsTest, ExecuteWithTimeout) {
+  std::unique_ptr<thread::ThreadPool> thread_pool(
+      new thread::ThreadPool(Env::Default(), "ExecuteWithTimeout", 2));
+
+  // This should run till the end.
+  ASSERT_TRUE(ExecuteWithTimeout(
+      []() {  // Do nothing.
+      },
+      1000 /* timeout_in_ms */, thread_pool.get()));
+
+  // This should time out.
+  Notification notification;
+  ASSERT_FALSE(ExecuteWithTimeout(
+      [&notification]() { notification.WaitForNotification(); },
+      1 /* timeout_in_ms */, thread_pool.get()));
+  // Make sure to unblock the thread.
+  notification.Notify();
+
+  // This should run till the end.
+  ASSERT_TRUE(ExecuteWithTimeout([]() { sleep(1); }, 0 /* timeout_in_ms */,
+                                 thread_pool.get()));
+
+  // Deleting before local variables go off the stack.
+  thread_pool.reset();
+}
+
+TEST_F(UtilsTest, NumOutputs) {
+  EXPECT_EQ(2, NumOutputs(CreateConcatOffsetNode()));
+  EXPECT_EQ(5, NumOutputs(CreateFusedBatchNormNode()));
+  EXPECT_EQ(1, NumOutputs(CreateDequeueNode()));
 }
 
 }  // namespace

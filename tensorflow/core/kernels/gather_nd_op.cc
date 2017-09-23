@@ -21,6 +21,7 @@ limitations under the License.
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/kernels/bounds_check.h"
+#include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/mem.h"
 #include "tensorflow/core/platform/types.h"
@@ -83,7 +84,7 @@ class GatherNdOp : public OpKernel {
     Index total_nd = params_shape.dims();
 
     TensorShape result_shape(indices_shape);
-    result_shape.RemoveDim(result_shape.dims() - 1);
+    result_shape.RemoveLastDims(1);
 
     int64 slice_size_big = 1;
     for (Index i = indices_nd; i < total_nd; ++i) {

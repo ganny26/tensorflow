@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <set>
 #include <vector>
+#include "tensorflow/core/framework/function_testlib.h"
 #include "tensorflow/core/graph/graph_constructor.h"
 #include "tensorflow/core/graph/node_builder.h"
 #include "tensorflow/core/kernels/ops_util.h"
@@ -50,8 +51,8 @@ class GraphTest : public ::testing::Test {
   GraphTest() : graph_(OpRegistry::Global()) {}
   ~GraphTest() override {}
 
-  static void VerifyNodes(Node* node, std::vector<Node*> expected_in,
-                          std::vector<Node*> expected_out) {
+  static void VerifyNodes(Node* node, const std::vector<Node*>& expected_in,
+                          const std::vector<Node*>& expected_out) {
     std::vector<Node*> in;
     for (const Edge* e : node->in_edges()) {
       in.push_back(e->src());
@@ -109,6 +110,7 @@ class GraphTest : public ::testing::Test {
   // are readable.
   static std::vector<string> Stringify(const std::vector<Node*>& nodes) {
     std::vector<string> result;
+    result.reserve(nodes.size());
     for (Node* n : nodes) {
       result.push_back(n->DebugString());
     }
@@ -317,21 +319,21 @@ TEST_F(GraphTest, AddAttr) {
   n1->AddAttr("_a", "new_attr");
 
   string attr;
-  EXPECT_EQ(Status::OK(), GetNodeAttr(n1->def(), "_a", &attr));
+  EXPECT_EQ(Status::OK(), GetNodeAttr(n1->attrs(), "_a", &attr));
   EXPECT_EQ("new_attr", attr);
 
   Node* n2 = graph_.CopyNode(n1);
 
   n1->AddAttr("_b", "new_attr_2");
 
-  EXPECT_EQ(Status::OK(), GetNodeAttr(n1->def(), "_a", &attr));
+  EXPECT_EQ(Status::OK(), GetNodeAttr(n1->attrs(), "_a", &attr));
   EXPECT_EQ("new_attr", attr);
-  EXPECT_EQ(Status::OK(), GetNodeAttr(n1->def(), "_b", &attr));
+  EXPECT_EQ(Status::OK(), GetNodeAttr(n1->attrs(), "_b", &attr));
   EXPECT_EQ("new_attr_2", attr);
 
-  EXPECT_EQ(Status::OK(), GetNodeAttr(n2->def(), "_a", &attr));
+  EXPECT_EQ(Status::OK(), GetNodeAttr(n2->attrs(), "_a", &attr));
   EXPECT_EQ("new_attr", attr);
-  EXPECT_NE(Status::OK(), GetNodeAttr(n2->def(), "_b", &attr));
+  EXPECT_NE(Status::OK(), GetNodeAttr(n2->attrs(), "_b", &attr));
 }
 
 // Convert edge iteration results into a sorted string.
@@ -377,6 +379,37 @@ TEST_F(GraphTest, NewName) {
   EXPECT_TRUE(StringPiece(a1).starts_with("A")) << a1;
 }
 
+TEST_F(GraphTest, IsValidNode) {
+  // Add 1 node to graph_
+  Node* g1_node1;
+  TF_CHECK_OK(NodeBuilder("g1_node1", "NoOp").Finalize(&graph_, &g1_node1));
+
+  // Add 2 nodes to graph2
+  Graph graph2(OpRegistry::Global());
+  Node* g2_node1;
+  Node* g2_node2;
+  TF_CHECK_OK(NodeBuilder("g2_node1", "NoOp").Finalize(&graph2, &g2_node1));
+  TF_CHECK_OK(NodeBuilder("g2_node2", "NoOp").Finalize(&graph2, &g2_node2));
+
+  // nullptr
+  Status s = graph_.IsValidNode(nullptr);
+  EXPECT_EQ(error::INVALID_ARGUMENT, s.code());
+  EXPECT_EQ(string("Node is null"), s.error_message());
+
+  // node id_ is too high
+  s = graph_.IsValidNode(g2_node2);
+  EXPECT_EQ(error::INVALID_ARGUMENT, s.code());
+  EXPECT_EQ(string("node id 3 is >= than number of nodes in graph 3"),
+            s.error_message());
+
+  // valid id_ but different ptr
+  s = graph_.IsValidNode(g2_node1);
+  EXPECT_EQ(error::INVALID_ARGUMENT, s.code());
+  EXPECT_EQ(string("Node with id 2 is different from the passed in node. "
+                   "Does it belong to a different graph?"),
+            s.error_message());
+}
+
 TEST_F(GraphTest, InputEdges) {
   Node* a = FromNodeDef("A", "OneOutput", 0);
   Node* b = FromNodeDef("B", "TwoInputsOneOutput", 2);
@@ -385,6 +418,60 @@ TEST_F(GraphTest, InputEdges) {
   EXPECT_EQ(error::INVALID_ARGUMENT, b->input_edges(&edges).code());
   graph_.AddEdge(a, 0, b, 1);
   TF_EXPECT_OK(b->input_edges(&edges));
+}
+
+TEST_F(GraphTest, AddFunctionLibrary) {
+  // Basic functionality
+  FunctionDefLibrary proto;
+  *proto.add_function() = test::function::XTimesTwo();
+  *proto.add_function() = test::function::XTimesFour();
+  TF_EXPECT_OK(graph_.AddFunctionLibrary(proto));
+  EXPECT_TRUE(graph_.flib_def().Find("XTimesTwo") != nullptr);
+  EXPECT_TRUE(graph_.flib_def().Find("XTimesFour") != nullptr);
+
+  // Duplicate functions are ignored
+  TF_EXPECT_OK(graph_.AddFunctionLibrary(proto));
+  EXPECT_TRUE(graph_.flib_def().Find("XTimesTwo") != nullptr);
+  EXPECT_TRUE(graph_.flib_def().Find("XTimesFour") != nullptr);
+
+  // Duplicate names corresponding to different functions trigger an error
+  FunctionDefLibrary error_proto = proto;
+  *error_proto.mutable_function(0)->add_node_def() =
+      error_proto.function(0).node_def(0);
+  Status s = graph_.AddFunctionLibrary(error_proto);
+  EXPECT_FALSE(s.ok());
+  EXPECT_EQ(s.error_message(),
+            "Cannot add function 'XTimesTwo' because a different function with "
+            "the same name already exists.");
+
+  // Function with same name as an existing op triggers an error
+  error_proto = proto;
+  error_proto.mutable_function(0)->mutable_signature()->set_name("Add");
+  s = graph_.AddFunctionLibrary(error_proto);
+  EXPECT_FALSE(s.ok());
+  EXPECT_EQ(s.error_message(),
+            "Cannot add function 'Add' because an op with the same name "
+            "already exists.");
+
+  // Adding a gradient function to an existing function is ok
+  GradientDef* grad = proto.add_gradient();
+  grad->set_function_name("XTimesTwo");
+  grad->set_gradient_func("Undefined");  // undefined funcs in grads are ok
+  TF_EXPECT_OK(graph_.AddFunctionLibrary(proto));
+  EXPECT_EQ(graph_.flib_def().FindGradient("XTimesTwo"), "Undefined");
+
+  // Duplicate gradients are ignored
+  TF_EXPECT_OK(graph_.AddFunctionLibrary(proto));
+  EXPECT_EQ(graph_.flib_def().FindGradient("XTimesTwo"), "Undefined");
+
+  // Conflicting gradient triggers an error
+  error_proto = proto;
+  error_proto.mutable_gradient(0)->set_gradient_func("Undefined2");
+  s = graph_.AddFunctionLibrary(error_proto);
+  EXPECT_FALSE(s.ok());
+  EXPECT_EQ(s.error_message(),
+            "Cannot assign gradient function 'Undefined2' to 'XTimesTwo' "
+            "because it already has gradient function 'Undefined'");
 }
 
 REGISTER_OP("Input").Output("o: float");

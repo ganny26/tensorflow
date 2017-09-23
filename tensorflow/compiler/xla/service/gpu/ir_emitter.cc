@@ -20,10 +20,10 @@ limitations under the License.
 
 #include "tensorflow/core/platform/logging.h"
 // IWYU pragma: no_include "llvm/IR/Intrinsics.gen.inc"
-#include "external/llvm/include/llvm/IR/BasicBlock.h"
-#include "external/llvm/include/llvm/IR/Constants.h"
-#include "external/llvm/include/llvm/IR/Instructions.h"
-#include "external/llvm/include/llvm/IR/Module.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
 #include "tensorflow/compiler/xla/primitive_util.h"
 #include "tensorflow/compiler/xla/service/elemental_ir_emitter.h"
 #include "tensorflow/compiler/xla/service/gpu/elemental_ir_emitter.h"
@@ -45,6 +45,7 @@ limitations under the License.
 
 namespace xla {
 
+using llvm_ir::IrName;
 using llvm_ir::SetToFirstInsertPoint;
 
 namespace gpu {
@@ -57,7 +58,9 @@ IrEmitter::IrEmitter(const HloModuleConfig& hlo_module_config,
                 &ir_emitter_context->buffer_assignment(), &ir_builder_,
                 is_nested),
       hlo_module_config_(hlo_module_config) {
-  ir_builder_.setFastMathFlags(llvm_ir::GetFastMathFlags(hlo_module_config));
+  ir_builder_.setFastMathFlags(llvm_ir::GetFastMathFlags(
+      /*fast_math_enabled=*/hlo_module_config.debug_options()
+          .xla_enable_fast_math()));
 }
 
 Status IrEmitter::DefaultAction(HloInstruction* hlo) {
@@ -200,18 +203,22 @@ bool IrEmitter::MaybeEmitSpecialAtomicOperation(
   // NVPTX supports atomicMax and atomicMin on only integer types.
   if (root_opcode == HloOpcode::kMaximum &&
       primitive_util::IsIntegralType(element_type)) {
-    // min(integral, integral)
-    ir_builder_.CreateAtomicRMW(llvm::AtomicRMWInst::Max, output_address,
-                                source,
+    // max(integral, integral)
+    auto opcode = primitive_util::IsSignedIntegralType(element_type)
+                      ? llvm::AtomicRMWInst::Max
+                      : llvm::AtomicRMWInst::UMax;
+    ir_builder_.CreateAtomicRMW(opcode, output_address, source,
                                 llvm::AtomicOrdering::SequentiallyConsistent);
     return true;
   }
 
   if (root_opcode == HloOpcode::kMinimum &&
       primitive_util::IsIntegralType(element_type)) {
-    // max(integral, integral)
-    ir_builder_.CreateAtomicRMW(llvm::AtomicRMWInst::Min, output_address,
-                                source,
+    // min(integral, integral)
+    auto opcode = primitive_util::IsSignedIntegralType(element_type)
+                      ? llvm::AtomicRMWInst::Min
+                      : llvm::AtomicRMWInst::UMin;
+    ir_builder_.CreateAtomicRMW(opcode, output_address, source,
                                 llvm::AtomicOrdering::SequentiallyConsistent);
     return true;
   }
@@ -376,7 +383,7 @@ Status IrEmitter::HandleDot(HloInstruction* dot,
   // Create loop nests which loop through the LHS operand dimensions and the RHS
   // operand dimensions. The reduction dimension of the LHS and RHS are handled
   // in a separate innermost loop which performs the sum of products.
-  llvm_ir::ForLoopNest loop_nest(&ir_builder_);
+  llvm_ir::ForLoopNest loop_nest(IrName(dot), &ir_builder_);
   llvm_ir::IrArray::Index lhs_index = EmitOperandArrayLoopNest(
       lhs_array, lhs_reduction_dimension, "lhs", &loop_nest);
   llvm_ir::IrArray::Index rhs_index = EmitOperandArrayLoopNest(
@@ -399,7 +406,7 @@ Status IrEmitter::HandleDot(HloInstruction* dot,
   llvm::Type* accum_type = target_array.GetElementLlvmType();
   llvm::Value* accum_address = llvm_ir::EmitAllocaAtFunctionEntry(
       accum_type,       // The pointee type of the alloca instruction.
-      "accum_address",  // The name of the alloca instuction.
+      "accum_address",  // The name of the alloca instruction.
       &ir_builder_);
 
   // Initialize the accumulator in the preheader to zero.
@@ -498,7 +505,7 @@ Status IrEmitter::HandleReduce(HloInstruction* reduce, HloInstruction* arg,
         // AddLoopsForShapeOnDimensions will return an Index where induction
         // Value*s are placed for each dimension in dimensions, and all the rest
         // are nullptrs.
-        llvm_ir::ForLoopNest loops(&ir_builder_);
+        llvm_ir::ForLoopNest loops(IrName(reduce, "inner"), &ir_builder_);
         const llvm_ir::IrArray::Index reduced_dims_index =
             loops.AddLoopsForShapeOnDimensions(arg->shape(), dimensions,
                                                "reduction_dim");
@@ -513,7 +520,7 @@ Status IrEmitter::HandleReduce(HloInstruction* reduce, HloInstruction* arg,
         llvm_ir::IrArray::Index input_index = reduced_dims_index;
         llvm_ir::IrArray::Index::const_iterator it = index.begin();
 
-        for (auto i = 0; i < input_index.size(); ++i) {
+        for (size_t i = 0; i < input_index.size(); ++i) {
           if (input_index[i] == nullptr) {
             input_index[i] = *it++;
           }
@@ -549,14 +556,12 @@ Status IrEmitter::HandleFusion(HloInstruction* fusion) {
   return EmitTargetElementLoop(*fusion, fused_emitter.GetRootGenerator());
 }
 
-Status IrEmitter::HandleCall(
-    HloInstruction* call, tensorflow::gtl::ArraySlice<HloInstruction*> operands,
-    HloComputation* computation) {
+Status IrEmitter::HandleCall(HloInstruction* call) {
   std::vector<llvm::Value*> operand_addresses;
-  for (HloInstruction* operand : operands) {
+  for (HloInstruction* operand : call->operands()) {
     operand_addresses.push_back(GetBasePointer(*operand));
   }
-  return EmitCallToNestedComputation(*computation, operand_addresses,
+  return EmitCallToNestedComputation(*call->to_apply(), operand_addresses,
                                      GetBasePointer(*call));
 }
 
@@ -591,7 +596,7 @@ Status IrEmitter::HandleRng(HloInstruction* random,
                                    &ir_builder_, GetNestedComputer())
                  .MakeElementGenerator(random, operand_to_generator),
              GetIrArray(*random), &ir_builder_)
-      .EmitLoop();
+      .EmitLoop(IrName(random));
 }
 
 llvm_ir::IrArray::Index IrEmitter::EmitOperandArrayLoopNest(
@@ -614,7 +619,7 @@ llvm_ir::IrArray::Index IrEmitter::EmitOperandArrayLoopNest(
   llvm_ir::IrArray::Index index =
       loop_nest->AddLoopsForShapeOnDimensions(shape, dimensions, name_suffix);
   // Verify every dimension except the reduction dimension was set in the index.
-  for (auto dimension = 0; dimension < index.size(); ++dimension) {
+  for (size_t dimension = 0; dimension < index.size(); ++dimension) {
     if (dimension == reduction_dimension) {
       DCHECK_EQ(nullptr, index[dimension]);
     } else {

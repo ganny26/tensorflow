@@ -20,6 +20,7 @@ limitations under the License.
 #include <vector>
 
 #include "tensorflow/compiler/xla/literal_util.h"
+#include "tensorflow/compiler/xla/service/interpreter/platform_id.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/statusor.h"
@@ -36,19 +37,16 @@ namespace xla {
 
 GenericTransferManager::GenericTransferManager(se::Platform::Id platform_id)
     : platform_id_(platform_id) {
-  // We currently only support kHostPlatformId for CPU and kCudaPlatformId for
-  // GPU. Before supporting other platforms, we need to test this transfer
-  // manager on them.
+  // We currently only support kHostPlatformId for CPU, kCudaPlatformId for
+  // GPU and kInterpreterPlatformId for Interpreter. Before supporting other
+  // platforms, we need to test this transfer manager on them.
   CHECK(platform_id_ == se::host::kHostPlatformId ||
+        platform_id_ == se::interpreter::kInterpreterPlatformId ||
         platform_id_ == se::cuda::kCudaPlatformId);
 }
 
 se::Platform::Id GenericTransferManager::PlatformId() const {
-  if (platform_id_ == se::cuda::kCudaPlatformId ||
-      platform_id_ == se::host::kHostPlatformId) {
-    return platform_id_;
-  }
-  CHECK(false) << "GenericTransferManager::platform_id_ is invalid";
+  return platform_id_;
 }
 
 Status GenericTransferManager::TransferLiteralFromDevice(
@@ -82,13 +80,12 @@ Status GenericTransferManager::TransferLiteralFromDevice(
   }
 
   *literal->mutable_shape() = device_shape;
-  LiteralUtil::Reserve(ShapeUtil::ElementsIn(device_shape), literal);
+  literal->Reserve(ShapeUtil::ElementsIn(device_shape));
   TF_RETURN_IF_ERROR(TransferBufferFromDevice(
       executor, source, /*size=*/ShapeUtil::ByteSizeOf(device_shape),
-      /*destination=*/LiteralUtil::MutableInternalData(literal)));
+      /*destination=*/literal->MutableInternalData()));
   if (!ShapeUtil::Equal(literal_shape, device_shape)) {
-    literal->Swap(
-        LiteralUtil::Relayout(*literal, literal_shape.layout()).get());
+    *literal = std::move(*literal->Relayout(literal_shape.layout()));
   }
   TF_RET_CHECK(ShapeUtil::Equal(literal_shape, literal->shape()));
   return Status::OK();
@@ -118,10 +115,10 @@ GenericTransferManager::ShallowCopyTupleFromDevice(
 
   // Create a DeviceMemoryBase from each void* pointer.
   std::vector<se::DeviceMemoryBase> destination;
-  for (std::vector<void*>::size_type i = 0; i < element_pointers.size(); ++i) {
+  for (size_t i = 0; i < element_pointers.size(); ++i) {
     if (element_pointers[i] == nullptr &&
         !ShapeUtil::HasZeroElements(shape.tuple_shapes(i))) {
-      return FailedPrecondition("tuple contains nullptr at element %d", i);
+      return FailedPrecondition("tuple contains nullptr at element %lu", i);
     }
     int64 buffer_size = ShapeUtil::ByteSizeOf(shape.tuple_shapes(i),
                                               /*pointer_size=*/sizeof(void*));
@@ -152,27 +149,34 @@ Status GenericTransferManager::TransferLiteralToDevice(
         tuple_elements_on_device.data(), destination);
   }
 
-  return TransferBufferToDevice(
-      executor, /*size=*/GetByteSizeRequirement(shape),
-      /*source=*/LiteralUtil::InternalData(literal), destination);
+  return TransferBufferToDevice(executor,
+                                /*size=*/GetByteSizeRequirement(shape),
+                                /*source=*/literal.InternalData(), destination);
 }
 
 Status GenericTransferManager::TransferLiteralToInfeed(
     se::StreamExecutor* executor, const Literal& literal) {
-  return Unimplemented("Infeed is not supported on GPU (b/30467474)");
+  return Unimplemented("Generic transfer to Infeed");
+}
+
+Status GenericTransferManager::TransferBufferToInfeed(
+    perftools::gputools::StreamExecutor* executor, int64 size,
+    const void* source) {
+  return Unimplemented("Generic transfer to Infeed");
 }
 
 Status GenericTransferManager::TransferLiteralFromOutfeed(
     perftools::gputools::StreamExecutor* executor, const Shape& literal_shape,
     Literal* literal) {
-  return Unimplemented("Outfeed is not supported on CPU/GPU (b/30467474)");
+  return Unimplemented(
+      "Outfeed is not supported on this platform (b/30467474)");
 }
 
 Status GenericTransferManager::ResetDevices(
     tensorflow::gtl::ArraySlice<perftools::gputools::StreamExecutor*>
-        executors) {
+    /*executors*/) {
   return Unimplemented(
-      "Device reset is not yet supported on CPU and GPU (b/30481585)");
+      "Device reset is not yet supported on this platform (b/30481585)");
 }
 
 int64 GenericTransferManager::GetByteSizeRequirement(const Shape& shape) {
@@ -180,14 +184,3 @@ int64 GenericTransferManager::GetByteSizeRequirement(const Shape& shape) {
 }
 
 }  // namespace xla
-
-static xla::TransferManager* CreateGenericTransferManager() {
-  return new xla::GenericTransferManager(se::cuda::kCudaPlatformId);
-}
-
-static bool InitModule() {
-  xla::TransferManager::RegisterTransferManager(se::cuda::kCudaPlatformId,
-                                                CreateGenericTransferManager);
-  return true;
-}
-static bool module_initialized = InitModule();

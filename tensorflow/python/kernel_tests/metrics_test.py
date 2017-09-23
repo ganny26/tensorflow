@@ -227,20 +227,28 @@ class MeanTest(test.TestCase):
       self.assertAlmostEqual(1.65, sess.run(mean), 5)
 
   def testUnweighted(self):
-    values = _test_values((3, 2, 4))
+    values = _test_values((3, 2, 4, 1))
     mean_results = (
         metrics.mean(values),
         metrics.mean(values, weights=1.0),
         metrics.mean(values, weights=np.ones((1, 1, 1))),
         metrics.mean(values, weights=np.ones((1, 1, 1, 1))),
+        metrics.mean(values, weights=np.ones((1, 1, 1, 1, 1))),
         metrics.mean(values, weights=np.ones((1, 1, 4))),
+        metrics.mean(values, weights=np.ones((1, 1, 4, 1))),
         metrics.mean(values, weights=np.ones((1, 2, 1))),
+        metrics.mean(values, weights=np.ones((1, 2, 1, 1))),
         metrics.mean(values, weights=np.ones((1, 2, 4))),
+        metrics.mean(values, weights=np.ones((1, 2, 4, 1))),
         metrics.mean(values, weights=np.ones((3, 1, 1))),
+        metrics.mean(values, weights=np.ones((3, 1, 1, 1))),
         metrics.mean(values, weights=np.ones((3, 1, 4))),
+        metrics.mean(values, weights=np.ones((3, 1, 4, 1))),
         metrics.mean(values, weights=np.ones((3, 2, 1))),
+        metrics.mean(values, weights=np.ones((3, 2, 1, 1))),
         metrics.mean(values, weights=np.ones((3, 2, 4))),
-        metrics.mean(values, weights=np.ones((3, 2, 4, 1))),)
+        metrics.mean(values, weights=np.ones((3, 2, 4, 1))),
+        metrics.mean(values, weights=np.ones((3, 2, 4, 1, 1))),)
     expected = np.mean(values)
     with self.test_session():
       variables.local_variables_initializer().run()
@@ -304,9 +312,7 @@ class MeanTest(test.TestCase):
     invalid_weights = (
         (1,),
         (1, 1),
-        (1, 1, 1),
         (3, 2),
-        (3, 2, 4),
         (2, 4, 1),
         (4, 2, 4, 1),
         (3, 3, 4, 1),
@@ -1163,7 +1169,7 @@ class AUCTest(test.TestCase):
       self.assertAlmostEqual(1, auc.eval(), 6)
 
   def np_auc(self, predictions, labels, weights):
-    """Computes the AUC explicitely using Numpy.
+    """Computes the AUC explicitly using Numpy.
 
     Args:
       predictions: an ndarray with shape [N].
@@ -3532,7 +3538,7 @@ class MeanPerClassAccuracyTest(test.TestCase):
       weights_queue = data_flow_ops.FIFOQueue(
           6, dtypes=dtypes_lib.float32, shapes=(1, 1))
       _enqueue_vector(sess, weights_queue, [1.0])
-      _enqueue_vector(sess, weights_queue, [1.0])
+      _enqueue_vector(sess, weights_queue, [0.5])
       _enqueue_vector(sess, weights_queue, [1.0])
       _enqueue_vector(sess, weights_queue, [0.0])
       _enqueue_vector(sess, weights_queue, [1.0])
@@ -3545,7 +3551,7 @@ class MeanPerClassAccuracyTest(test.TestCase):
       variables.local_variables_initializer().run()
       for _ in range(6):
         sess.run(update_op)
-      desired_output = np.mean([2.0 / 2.0, 1.0 / 2.0])
+      desired_output = np.mean([2.0 / 2.0, 0.5 / 1.5])
       self.assertAlmostEqual(desired_output, mean_accuracy.eval())
 
   def testMultipleUpdatesWithMissingClass(self):

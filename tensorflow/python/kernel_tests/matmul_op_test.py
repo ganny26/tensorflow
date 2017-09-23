@@ -31,6 +31,9 @@ from tensorflow.python.ops import random_ops
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import test as test_lib
 
+# TODO(yangzihao): Currently matmul autotuning is disabled by default. Use
+# os.environ["TF_MATMUL_AUTOTUNE_ENABLE"] = "1" to enable it.
+
 
 def _AddTest(test, op_name, testcase_name, fn):
   test_name = "_".join(["test", op_name, testcase_name])
@@ -84,10 +87,10 @@ def _GetMatMulTest(a_np_, b_np_, use_static_shape_, **kwargs_):
     self.assertAllCloseAccordingToType(
         tf_val,
         np_val,
-        float_rtol=1e-5,
-        float_atol=1e-5,
-        half_rtol=0.1,
-        half_atol=0.1)
+        float_rtol=2e-5,
+        float_atol=2e-5,
+        half_rtol=0.2,
+        half_atol=0.2)
 
   return Test
 
