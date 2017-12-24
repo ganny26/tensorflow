@@ -127,9 +127,9 @@ load(
     "tf_additional_verbs_lib_defines",
     "tf_additional_mpi_lib_defines",
     "tf_additional_gdr_lib_defines",
-    "tf_additional_gpu_tracer_srcs",
-    "tf_additional_gpu_tracer_deps",
-    "tf_additional_gpu_tracer_cuda_deps",
+    "tf_additional_device_tracer_srcs",
+    "tf_additional_device_tracer_deps",
+    "tf_additional_device_tracer_cuda_deps",
     "tf_pyclif_proto_library",
     "tf_jspb_proto_library",
     "tf_nano_proto_library",
@@ -163,6 +163,7 @@ CORE_PROTO_SRCS = [
     "framework/function.proto",
     "framework/graph.proto",
     "framework/graph_transfer_info.proto",
+    "framework/iterator.proto",
     "framework/kernel_def.proto",
     "framework/log_memory.proto",
     "framework/node_def.proto",
@@ -218,7 +219,6 @@ tf_proto_library(
     j2objc_api_version = 1,
     java_api_version = 2,
     js_api_version = 2,
-    js_codegen = "jspb",
     visibility = ["//visibility:public"],
 )
 
@@ -247,6 +247,14 @@ tf_proto_library(
     cc_api_version = 2,
     protodeps = tf_additional_all_protos(),
     visibility = ["//visibility:public"],
+)
+
+# Minimal lib to detect plafrom
+cc_library(
+    name = "lib_platform",
+    hdrs = [
+        "platform/platform.h",
+    ],
 )
 
 # Minimal lib so that tools used for mobile compilation
@@ -312,6 +320,7 @@ cc_library(
         "lib/io/table_options.h",
         "lib/math/math_util.h",
         "lib/monitoring/counter.h",
+        "lib/monitoring/gauge.h",
         "lib/monitoring/sampler.h",
         "lib/random/distribution_sampler.h",
         "lib/random/philox_random.h",
@@ -446,6 +455,8 @@ tf_cuda_library(
         "util/mirror_pad_mode.h",
         "util/padding.h",
         "util/port.h",
+        "util/ptr_util.h",
+        "util/reffed_status_callback.h",
         "util/saved_tensor_slice_util.h",
         "util/sparse/group_iterator.h",
         "util/sparse/sparse_tensor.h",
@@ -484,6 +495,11 @@ cc_library(
 )
 
 cc_library(
+    name = "ptr_util",
+    hdrs = ["util/ptr_util.h"],
+)
+
+cc_library(
     name = "reader_base",
     srcs = ["framework/reader_base.cc"],
     hdrs = ["framework/reader_base.h"],
@@ -510,6 +526,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":lib",
+        ":lib_internal",
         ":op_gen_overrides_proto_cc",
         ":protos_all_cc",
     ],
@@ -558,6 +575,7 @@ cc_library(
 
 # Generates library per group of ops.
 tf_gen_op_libs(
+    is_external = False,
     op_lib_names = [
         "bitwise_ops",
         "candidate_sampling_ops",
@@ -651,14 +669,15 @@ cc_library(
         ":image_ops_op_lib",
         ":io_ops_op_lib",
         ":linalg_ops_op_lib",
-        ":lookup_ops_op_lib",
         ":logging_ops_op_lib",
+        ":lookup_ops_op_lib",
         ":math_ops_op_lib",
         ":nn_ops_op_lib",
         ":no_op_op_lib",
         ":parsing_ops_op_lib",
         ":random_ops_op_lib",
         ":remote_fused_graph_ops_op_lib",
+        ":resource_variable_ops_op_lib",
         ":script_ops_op_lib",
         ":sdca_ops_op_lib",
         ":sendrecv_ops_op_lib",
@@ -734,6 +753,7 @@ tf_cuda_library(
     name = "core_cpu",
     hdrs = [
         "common_runtime/device.h",
+        "common_runtime/device_factory.h",
         "common_runtime/optimization_registry.h",
         "common_runtime/shape_refiner.h",
         "graph/algorithm.h",
@@ -780,6 +800,7 @@ cc_library(
         "//tensorflow/core/kernels:dataset_ops",
         "//tensorflow/core/kernels:fake_quant_ops",
         "//tensorflow/core/kernels:function_ops",
+        "//tensorflow/core/kernels:histogram_op",
         "//tensorflow/core/kernels:image",
         "//tensorflow/core/kernels:io",
         "//tensorflow/core/kernels:linalg",
@@ -888,6 +909,7 @@ cc_library(
         ":test",
         "//tensorflow/cc:scope",
         "//tensorflow/core/kernels:constant_op",
+        "//tensorflow/core/kernels:ops_testutil",
         "//tensorflow/core/kernels:ops_util",
     ],
 )
@@ -993,7 +1015,7 @@ filegroup(
 cc_library(
     name = "android_tensorflow_lib_lite",
     srcs = if_android(["//tensorflow/core:android_srcs"]),
-    copts = tf_copts() + if_not_android_mips_and_mips64(["-Os"]),
+    copts = tf_copts(android_optimization_level_override = None),
     linkopts = ["-lz"],
     tags = [
         "manual",
@@ -1081,8 +1103,7 @@ cc_library(
 cc_library(
     name = "android_tensorflow_lib_selective_registration",
     srcs = if_android(["//tensorflow/core:android_srcs"]),
-    copts = tf_copts() + [
-        "-Os",
+    copts = tf_copts(android_optimization_level_override = None) + [
         "-DSUPPORT_SELECTIVE_REGISTRATION",
     ],
     tags = [
@@ -1103,8 +1124,7 @@ cc_library(
 cc_library(
     name = "android_tensorflow_lib_selective_registration_nortti",
     srcs = if_android(["//tensorflow/core:android_srcs"]),
-    copts = tf_copts() + tf_opts_nortti_if_android() + [
-        "-Os",
+    copts = tf_copts(android_optimization_level_override = None) + tf_opts_nortti_if_android() + [
         "-DSUPPORT_SELECTIVE_REGISTRATION",
     ],
     tags = [
@@ -1183,7 +1203,7 @@ cc_library(
         "framework/tensor_testutil.h",
         "util/reporter.h",
     ],
-    copts = tf_copts() + ["-Os"],
+    copts = tf_copts(android_optimization_level_override = None),
     tags = [
         "manual",
         "notap",
@@ -1280,6 +1300,13 @@ tf_pyclif_proto_library(
     visibility = ["//visibility:public"],
 )
 
+tf_pyclif_proto_library(
+    name = "protobuf/meta_graph_pyclif",
+    proto_lib = ":protos_all_cc",
+    proto_srcfile = "protobuf/meta_graph.proto",
+    visibility = ["//visibility:public"],
+)
+
 # -----------------------------------------------------------------------------
 # Internal targets
 
@@ -1373,6 +1400,7 @@ LIB_INTERNAL_PUBLIC_HEADERS = tf_additional_lib_hdrs() + [
     "lib/monitoring/collection_registry.h",
     "lib/monitoring/metric_def.h",
     "lib/monitoring/mobile_counter.h",
+    "lib/monitoring/mobile_gauge.h",
     "lib/monitoring/mobile_sampler.h",
     "lib/png/png_io.h",
     "lib/random/random.h",
@@ -1389,20 +1417,24 @@ LIB_INTERNAL_PUBLIC_HEADERS = tf_additional_lib_hdrs() + [
     "platform/platform.h",
     "platform/protobuf_internal.h",
     "platform/setround.h",
+    "platform/snappy.h",
     "platform/tensor_coding.h",
     "platform/tracing.h",
 ]
+
+# Replicated for lib_internal and lib_internal_impl.
+LIB_INTERNAL_DEFINES = (tf_additional_lib_defines() + [
+                            "TF_USE_SNAPPY",
+                        ] + tf_additional_verbs_lib_defines() +
+                        tf_additional_mpi_lib_defines() +
+                        tf_additional_gdr_lib_defines())
 
 cc_library(
     name = "lib_internal",
     srcs = LIB_INTERNAL_PRIVATE_HEADERS,
     hdrs = LIB_INTERNAL_PUBLIC_HEADERS,
     copts = tf_copts(),
-    defines = tf_additional_lib_defines() + [
-                  "SNAPPY",
-              ] + tf_additional_verbs_lib_defines() +
-              tf_additional_mpi_lib_defines() +
-              tf_additional_gdr_lib_defines(),
+    defines = LIB_INTERNAL_DEFINES,
     linkopts = select({
         "//tensorflow:freebsd": [],
         "//tensorflow:windows": [],
@@ -1435,7 +1467,7 @@ cc_library(
             "lib/jpeg/**/*",
             "platform/**/env_time.cc",
             "platform/**/cuda_libdevice_path.cc",
-            "platform/**/gpu_tracer.cc",
+            "platform/**/device_tracer.cc",
             "platform/variant_coding.cc",
             "platform/**/variant_cord_coding.cc",
         ],
@@ -1446,7 +1478,7 @@ cc_library(
             "platform/**/cuda_libdevice_path.cc",
             "platform/**/stream_executor.h",
             "platform/**/env_time.cc",
-            "platform/**/gpu_tracer.cc",
+            "platform/**/device_tracer.cc",
             "platform/variant_coding.cc",
             "platform/**/variant_cord_coding.cc",
         ] +
@@ -1456,6 +1488,7 @@ cc_library(
     ),
     hdrs = LIB_INTERNAL_PUBLIC_HEADERS,
     copts = tf_copts(),
+    defines = LIB_INTERNAL_DEFINES,
     deps = tf_additional_lib_deps() + [
         ":lib_hash_crc32c_accelerate_internal",
         ":lib_proto_parsing",
@@ -1765,6 +1798,7 @@ tf_cuda_library(
     ) + if_mkl(
         [
             "//third_party/mkl:intel_binary_blob",
+            "@mkl_dnn//:mkl_dnn",
         ],
     ),
     alwayslink = 1,
@@ -1820,11 +1854,13 @@ cc_library(
     deps = ["//tensorflow/core/platform/default/build_config:protos_cc"],
 )
 
-CORE_CPU_BASE_HDRS = [
-    "common_runtime/device.h",
-    "common_runtime/graph_runner.h",
-    "common_runtime/shape_refiner.h",
-    "framework/versions.h",
+# Library containing all of the graph construction code that is
+# independent of the runtime.
+#
+# TODO(mrry): Refactor graph_constructor.cc so that it does not depend on code
+# in "common_runtime/", and then the entire "graph/" directory can be included
+# in this library.
+GRAPH_HDRS = [
     "graph/algorithm.h",
     "graph/colors.h",
     "graph/control_flow.h",
@@ -1832,7 +1868,7 @@ CORE_CPU_BASE_HDRS = [
     "graph/default_device.h",
     "graph/edgeset.h",
     "graph/graph.h",
-    "graph/graph_constructor.h",
+    "graph/graph_constructor.h",  # NOTE(mrry): Don't include the .cc since it depends on common_runtime.
     "graph/graph_def_builder.h",
     "graph/graph_partition.h",
     "graph/mkl_layout_pass.h",
@@ -1848,16 +1884,12 @@ CORE_CPU_BASE_HDRS = [
 ]
 
 tf_cuda_library(
-    name = "core_cpu_base",
+    name = "graph",
     srcs = [
-        "common_runtime/shape_refiner.cc",
-        "common_runtime/shape_refiner.h",
-        "framework/versions.h",
         "graph/algorithm.cc",
         "graph/colors.cc",
         "graph/control_flow.cc",
         "graph/costmodel.cc",
-        "graph/graph_constructor.cc",
         "graph/graph_def_builder.cc",
         "graph/graph_partition.cc",
         "graph/node_builder.cc",
@@ -1865,6 +1897,33 @@ tf_cuda_library(
         "graph/subgraph.cc",
         "graph/tensor_id.cc",
         "graph/validate.cc",
+    ],
+    hdrs = GRAPH_HDRS,
+    deps = [
+        ":framework",
+        ":framework_internal",
+        ":lib",
+        ":lib_internal",
+        ":proto_text",
+        ":protos_all_cc",
+        "//third_party/eigen3",
+    ],
+)
+
+CORE_CPU_BASE_HDRS = GRAPH_HDRS + [
+    "common_runtime/device.h",
+    "common_runtime/graph_runner.h",
+    "common_runtime/shape_refiner.h",
+    "framework/versions.h",
+]
+
+tf_cuda_library(
+    name = "core_cpu_base",
+    srcs = [
+        "common_runtime/shape_refiner.cc",
+        "common_runtime/shape_refiner.h",
+        "framework/versions.h",
+        "graph/graph_constructor.cc",  # Depends on common_runtime.
         "public/session.h",
         "public/session_options.h",
         "public/version.h",
@@ -1872,6 +1931,7 @@ tf_cuda_library(
     hdrs = CORE_CPU_BASE_HDRS,
     copts = tf_copts(),
     deps = [
+        ":graph",
         ":framework",
         ":framework_internal",
         ":lib",
@@ -1925,11 +1985,12 @@ CORE_CPU_LIB_HEADERS = CORE_CPU_BASE_HDRS + [
     "common_runtime/visitable_allocator.h",
     "graph/gradients.h",
     "graph/quantize_training.h",
-]
+] + if_mkl(["graph/mkl_graph_util.h"])
 
 tf_cuda_library(
     name = "core_cpu_impl",
     srcs = [
+        "common_runtime/accumulate_n_optimizer.cc",
         "common_runtime/allocator_retry.cc",
         "common_runtime/bfc_allocator.cc",
         "common_runtime/build_graph_options.cc",
@@ -1974,6 +2035,7 @@ tf_cuda_library(
     hdrs = CORE_CPU_LIB_HEADERS,
     copts = tf_copts(),
     deps = [
+        ":graph",
         ":framework",
         ":framework_internal",
         ":lib",
@@ -2015,6 +2077,7 @@ tf_cuda_library(
         ":function_ops_op_lib",
         ":functional_grad",
         ":functional_ops_op_lib",
+        ":graph",
         ":lib",
         ":lib_internal",
         ":proto_text",
@@ -2026,7 +2089,10 @@ tf_cuda_library(
         "//third_party/eigen3",
         "//tensorflow/core/kernels:required",
     ] + if_mkl(
-        ["//third_party/mkl:intel_binary_blob"],
+        [
+            "//third_party/mkl:intel_binary_blob",
+            "@mkl_dnn//:mkl_dnn",
+        ],
     ) + tf_additional_core_deps() + if_static([":core_cpu_impl"]),
     alwayslink = 1,
 )
@@ -2053,13 +2119,11 @@ tf_cuda_library(
         "util/env_var.h",
     ],
     copts = tf_copts(),
-    cuda_deps = [
-        ":gpu_tracer",
-    ],
-    linkstatic = 1,
     deps = [
         ":core_cpu_internal",
+        ":device_tracer",
         ":framework",
+        ":graph",
         ":lib",
         ":lib_internal",
         ":proto_text",
@@ -2090,18 +2154,18 @@ cc_library(
 )
 
 tf_cuda_library(
-    name = "gpu_tracer",
-    srcs = tf_additional_gpu_tracer_srcs(),
+    name = "device_tracer",
+    srcs = tf_additional_device_tracer_srcs(),
     hdrs = [
-        "platform/gpu_tracer.h",
+        "platform/device_tracer.h",
     ],
     copts = tf_copts(),
-    cuda_deps = tf_additional_cupti_wrapper_deps() + tf_additional_gpu_tracer_cuda_deps(),
+    cuda_deps = tf_additional_cupti_wrapper_deps() + tf_additional_device_tracer_cuda_deps(),
     deps = [
         ":core_cpu_internal",
         ":lib",
         ":protos_all_cc",
-    ] + tf_additional_gpu_tracer_deps(),
+    ] + tf_additional_device_tracer_deps(),
 )
 
 GPU_RUNTIME_HEADERS = [
@@ -2109,11 +2173,15 @@ GPU_RUNTIME_HEADERS = [
     "common_runtime/gpu/gpu_cudamalloc_allocator.h",
     "common_runtime/gpu/gpu_debug_allocator.h",
     "common_runtime/gpu/gpu_device.h",
+    "common_runtime/gpu/gpu_id.h",
+    "common_runtime/gpu/gpu_id_utils.h",
     "common_runtime/gpu/gpu_init.h",
+    "common_runtime/gpu/gpu_managed_allocator.h",
     "common_runtime/gpu/gpu_stream_util.h",
     "common_runtime/gpu/gpu_util.h",
     "common_runtime/gpu/pool_allocator.h",
     "common_runtime/gpu/process_state.h",
+    "common_runtime/gpu_device_context.h",
 ]
 
 tf_cuda_library(
@@ -2124,12 +2192,13 @@ tf_cuda_library(
         "common_runtime/gpu/gpu_debug_allocator.cc",
         "common_runtime/gpu/gpu_device.cc",
         "common_runtime/gpu/gpu_device_factory.cc",
+        "common_runtime/gpu/gpu_id_utils.cc",
+        "common_runtime/gpu/gpu_managed_allocator.cc",
         "common_runtime/gpu/gpu_stream_util.cc",
         "common_runtime/gpu/gpu_util.cc",
         "common_runtime/gpu/gpu_util_platform_specific.cc",
         "common_runtime/gpu/pool_allocator.cc",
         "common_runtime/gpu/process_state.cc",
-        "common_runtime/gpu_device_context.h",
     ],
     hdrs = GPU_RUNTIME_HEADERS,
     copts = tf_copts(),
@@ -2140,6 +2209,7 @@ tf_cuda_library(
         ":framework_internal",
         ":gpu_init_impl",
         ":gpu_lib",
+        ":graph",
         ":lib",
         ":lib_internal",
         ":protos_all_cc",
@@ -2160,6 +2230,7 @@ tf_cuda_library(
         ":lib",
         ":lib_internal",
         ":protos_all_cc",
+        ":stream_executor",
         "//third_party/eigen3",
     ] + if_static([":gpu_runtime_impl"]),
 )
@@ -2242,7 +2313,6 @@ cc_library(
         "lib/io/block_builder.h",
         "lib/io/format.h",
         "lib/random/philox_random_test_utils.h",
-        "platform/snappy.h",
     ],
     deps = [
         ":lib",
@@ -2337,6 +2407,7 @@ tf_cc_tests(
         "lib/math/math_util_test.cc",
         "lib/monitoring/collection_registry_test.cc",
         "lib/monitoring/counter_test.cc",
+        "lib/monitoring/gauge_test.cc",
         "lib/monitoring/metric_def_test.cc",
         "lib/monitoring/sampler_test.cc",
         "lib/random/distribution_sampler_test.cc",
@@ -2489,6 +2560,7 @@ tf_cc_test(
     srcs = ["framework/op_gen_lib_test.cc"],
     deps = [
         ":op_gen_lib",
+        ":protos_all_cc",
         ":test",
         ":test_main",
     ],
@@ -2576,6 +2648,7 @@ tf_cc_tests(
         "util/example_proto_helper_test.cc",
         "util/memmapped_file_system_test.cc",
         "util/presized_cuckoo_map_test.cc",
+        "util/reffed_status_callback_test.cc",
         "util/reporter_test.cc",
         "util/saved_tensor_slice_util_test.cc",
         "util/semver_test.cc",
@@ -2612,6 +2685,7 @@ tf_cc_tests(
         "//tensorflow/cc:cc_ops_internal",
         "//tensorflow/cc:scope",
         "//tensorflow/cc:sendrecv_ops",
+        "//tensorflow/cc:while_loop",
         "//tensorflow/core/kernels:ops_util",
         "//third_party/eigen3",
     ],
@@ -2654,13 +2728,30 @@ tf_cc_tests(
 )
 
 tf_cc_test_mkl(
+    name = "mkl_runtime_tests",
+    size = "small",
+    srcs = ["common_runtime/mkl_cpu_allocator_test.cc"],
+    linkstatic = 1,
+    deps = [
+        ":core",
+        ":core_cpu",
+        ":framework",
+        ":framework_internal",
+        ":test",
+        ":test_main",
+        ":testlib",
+    ],
+)
+
+tf_cc_test_mkl(
     name = "mkl_related_tests",
     size = "small",
     srcs = [
         "graph/mkl_layout_pass_test.cc",
         "graph/mkl_tfconversion_pass_test.cc",
+        "util/mkl_util_test.cc",
     ],
-    linkstatic = tf_kernel_tests_linkstatic(),
+    linkstatic = 1,
     deps = [
         ":core",
         ":core_cpu",
@@ -2678,6 +2769,9 @@ tf_cc_test_mkl(
         "//tensorflow/cc:cc_ops",
         "//tensorflow/cc:scope",
         "//tensorflow/cc:sendrecv_ops",
+        "//tensorflow/core/kernels:ops_util",
+        "//third_party/eigen3",
+    ] + if_mkl([
         "//tensorflow/core/kernels:mkl_aggregate_ops",
         "//tensorflow/core/kernels:mkl_concat_op",
         "//tensorflow/core/kernels:mkl_conv_op",
@@ -2690,8 +2784,18 @@ tf_cc_test_mkl(
         "//tensorflow/core/kernels:mkl_relu_op",
         "//tensorflow/core/kernels:mkl_reshape_op",
         "//tensorflow/core/kernels:mkl_tfconv_op",
-        "//tensorflow/core/kernels:ops_util",
-        "//third_party/eigen3",
+    ]),
+)
+
+tf_cc_tests_gpu(
+    name = "gpu_device_on_non_gpu_machine_test",
+    size = "small",
+    srcs = ["common_runtime/gpu/gpu_device_on_non_gpu_machine_test.cc"],
+    linkstatic = tf_kernel_tests_linkstatic(),
+    deps = [
+        ":gpu_headers_lib",
+        ":gpu_runtime",
+        ":test",
     ],
 )
 
@@ -2700,6 +2804,8 @@ tf_cc_tests_gpu(
     size = "small",
     srcs = glob(["user_ops/**/*_test.cc"]) + [
         "common_runtime/gpu/gpu_bfc_allocator_test.cc",
+        "common_runtime/gpu/gpu_device_test.cc",
+        "common_runtime/gpu/gpu_id_utils_test.cc",
         "common_runtime/gpu/gpu_event_mgr_test.cc",
         "common_runtime/gpu/pool_allocator_test.cc",
     ],
@@ -2860,9 +2966,11 @@ tf_cc_test(
         ":test_main",
         ":testlib",
         "//tensorflow/cc:cc_ops",
+        "//tensorflow/cc:resource_variable_ops",
         "//tensorflow/cc:scope",
         "//tensorflow/core/kernels:array",
         "//tensorflow/core/kernels:math",
+        "//tensorflow/core/kernels:resource_variable_ops",
         "//third_party/eigen3",
     ],
 )
@@ -3062,6 +3170,7 @@ tf_cc_test(
         "//tensorflow/core/kernels:cwise_op",
         "//tensorflow/core/kernels:function_ops",
         "//tensorflow/core/kernels:matmul_op",
+        "//tensorflow/core/kernels:random_ops",
         "//tensorflow/core/kernels:shape_ops",
         "//third_party/eigen3",
     ],
@@ -3312,10 +3421,41 @@ tf_cc_test(
     ],
 )
 
+filegroup(
+    name = "base_api_def",
+    srcs = glob(["api_def/base_api/*"]),
+)
+
+filegroup(
+    name = "python_api_def",
+    srcs = glob(["api_def/python_api/*"]),
+)
+
+tf_cc_test(
+    name = "api_test",
+    srcs = ["api_def/api_test.cc"],
+    data = [
+        ":base_api_def",
+        "//tensorflow/cc:ops/op_gen_overrides.pbtxt",
+    ],
+    deps = [
+        ":framework",
+        ":framework_internal",
+        ":lib",
+        ":lib_internal",
+        ":lib_test_internal",
+        ":op_gen_lib",
+        ":op_gen_overrides_proto_cc",
+        ":ops",
+        ":protos_all_cc",
+        ":test",
+    ],
+)
+
 tf_cc_test_gpu(
-    name = "gpu_tracer_test",
+    name = "device_tracer_test",
     size = "small",
-    srcs = ["platform/gpu_tracer_test.cc"],
+    srcs = ["platform/device_tracer_test.cc"],
     args = ["--heap_check=local"],
     linkstatic = tf_kernel_tests_linkstatic(),
     tags = tf_cuda_tests_tags() + ["nomac"],
@@ -3323,12 +3463,12 @@ tf_cc_test_gpu(
         ":all_kernels",
         ":core_cpu",
         ":core_cpu_internal",
+        ":device_tracer",
         ":direct_session",
         ":direct_session_internal",
         ":framework",
         ":framework_internal",
         ":gpu_runtime",
-        ":gpu_tracer",
         ":lib",
         ":lib_internal",
         ":protos_all_cc",

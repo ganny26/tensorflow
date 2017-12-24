@@ -65,22 +65,21 @@ Status VirtualCluster::Run(const GraphDef& graph,
 
   Costs node_costs;
   do {
-    NodeInfo node_info = scheduler.GetCurrNodeInfo();
-    const auto& op_info = node_info.op_info;
-    node_costs = node_estimator_->PredictCosts(op_info);
+    OpContext op_context = scheduler.GetCurrNode();
+    node_costs = node_estimator_->PredictCosts(op_context);
     if (metadata) {
       CostGraphDef::Node* cost_node =
           metadata->mutable_cost_graph()->add_node();
-      const string& op_name = node_info.name;
+      const string& op_name = op_context.name;
       cost_node->set_name(op_name);
-      cost_node->set_device(node_info.device_name);
+      cost_node->set_device(op_context.device_name);
       cost_node->set_compute_cost(
           node_costs.execution_time.asMicroSeconds().count());
       cost_node->set_compute_time(
           node_costs.compute_time.asMicroSeconds().count());
       cost_node->set_memory_time(
           node_costs.memory_time.asMicroSeconds().count());
-      for (const auto& output : node_info.op_info.outputs()) {
+      for (const auto& output : op_context.op_info.outputs()) {
         auto output_info = cost_node->add_output_info();
         output_info->set_dtype(output.dtype());
         *output_info->mutable_shape() = output.shape();
@@ -97,6 +96,33 @@ Status VirtualCluster::Run(const GraphDef& graph,
   if (metadata) {
     scheduler.Summary(metadata);
   }
+
+  const std::unordered_map<string, DeviceProperties>& device = GetDevices();
+  std::unordered_map<string, int64> peak_mem_usage =
+      scheduler.GetPeakMemoryUsage();
+  for (const auto& mem_usage : peak_mem_usage) {
+    const string& device_name = mem_usage.first;
+    auto it = device.find(device_name);
+    if (it == device.end()) {
+      // It's probably the fake send/recv device. Eventually we'll need to
+      // remove this fake device to ensure proper memory accounting for
+      // multi-device settings.
+      continue;
+    }
+    const DeviceProperties& dev = it->second;
+    if (dev.memory_size() <= 0) {
+      // Available device memory unknown
+      continue;
+    }
+    int64 peak_mem = mem_usage.second;
+    if (peak_mem >= dev.memory_size()) {
+      return errors::ResourceExhausted(
+          "Graph requires ", peak_mem, " bytes of memory on device ",
+          device_name, " to run ", " but device only has ", dev.memory_size(),
+          " available.");
+    }
+  }
+
   return Status::OK();
 }
 
