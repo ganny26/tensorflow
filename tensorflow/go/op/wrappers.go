@@ -5922,6 +5922,7 @@ func RandomDataset(scope *Scope, seed tf.Output, seed2 tf.Output, output_types [
 //
 // This op is hidden from public in Python. It is used by TensorFlow Debugger to
 // register gradient tensors for gradient debugging.
+// This op operates on non-reference-type tensors.
 func DebugGradientIdentity(scope *Scope, input tf.Output) (output tf.Output) {
 	if scope.Err() != nil {
 		return
@@ -5953,7 +5954,7 @@ func TensorArrayGradV2(scope *Scope, handle tf.Output, flow_in tf.Output, source
 	return op.Output(0)
 }
 
-// Creates a dataset that yields a SparseTensor for each element of the input.
+// Creates a dataset that batches input elements into a SparseTensor.
 //
 // Arguments:
 //	input_dataset: A handle to an input dataset. Must have a single component.
@@ -6677,7 +6678,7 @@ func SampleDistortedBoundingBoxV2UseImageIfNoBoundingBoxes(value bool) SampleDis
 //     # Draw the bounding box in an image summary.
 //     image_with_box = tf.image.draw_bounding_boxes(tf.expand_dims(image, 0),
 //                                                   bbox_for_draw)
-//     tf.image_summary('images_with_box', image_with_box)
+//     tf.summary.image('images_with_box', image_with_box)
 //
 //     # Employ the bounding box to distort the image.
 //     distorted_image = tf.slice(image, begin, size)
@@ -8732,114 +8733,25 @@ func Print(scope *Scope, input tf.Output, data []tf.Output, optional ...PrintAtt
 	return op.Output(0)
 }
 
-// Makes its input available to the next iteration.
+// Table initializer that takes two tensors for keys and values respectively.
 //
 // Arguments:
-//	data: The tensor to be made available to the next iteration.
-//
-// Returns The same tensor as `data`.
-func NextIteration(scope *Scope, data tf.Output) (output tf.Output) {
-	if scope.Err() != nil {
-		return
-	}
-	opspec := tf.OpSpec{
-		Type: "NextIteration",
-		Input: []tf.Input{
-			data,
-		},
-	}
-	op := scope.AddOperation(opspec)
-	return op.Output(0)
-}
-
-// Does nothing. Only useful as a placeholder for control edges.
+//	table_handle: Handle to a table which will be initialized.
+//	keys: Keys of type Tkey.
+//	values: Values of type Tval.
 //
 // Returns the created operation.
-func NoOp(scope *Scope) (o *tf.Operation) {
+func InitializeTableV2(scope *Scope, table_handle tf.Output, keys tf.Output, values tf.Output) (o *tf.Operation) {
 	if scope.Err() != nil {
 		return
 	}
 	opspec := tf.OpSpec{
-		Type: "NoOp",
+		Type: "InitializeTableV2",
+		Input: []tf.Input{
+			table_handle, keys, values,
+		},
 	}
 	return scope.AddOperation(opspec)
-}
-
-// DepthwiseConv2dNativeAttr is an optional argument to DepthwiseConv2dNative.
-type DepthwiseConv2dNativeAttr func(optionalAttr)
-
-// DepthwiseConv2dNativeDataFormat sets the optional data_format attribute to value.
-//
-// value: Specify the data format of the input and output data. With the
-// default format "NHWC", the data is stored in the order of:
-//     [batch, height, width, channels].
-// Alternatively, the format could be "NCHW", the data storage order of:
-//     [batch, channels, height, width].
-// If not specified, defaults to "NHWC"
-func DepthwiseConv2dNativeDataFormat(value string) DepthwiseConv2dNativeAttr {
-	return func(m optionalAttr) {
-		m["data_format"] = value
-	}
-}
-
-// DepthwiseConv2dNativeDilations sets the optional dilations attribute to value.
-//
-// value: 1-D tensor of length 4.  The dilation factor for each dimension of
-// `input`. If set to k > 1, there will be k-1 skipped cells between each filter
-// element on that dimension. The dimension order is determined by the value of
-// `data_format`, see above for details. Dilations in the batch and depth
-// dimensions must be 1.
-// If not specified, defaults to <i:1 i:1 i:1 i:1 >
-func DepthwiseConv2dNativeDilations(value []int64) DepthwiseConv2dNativeAttr {
-	return func(m optionalAttr) {
-		m["dilations"] = value
-	}
-}
-
-// Computes a 2-D depthwise convolution given 4-D `input` and `filter` tensors.
-//
-// Given an input tensor of shape `[batch, in_height, in_width, in_channels]`
-// and a filter / kernel tensor of shape
-// `[filter_height, filter_width, in_channels, channel_multiplier]`, containing
-// `in_channels` convolutional filters of depth 1, `depthwise_conv2d` applies
-// a different filter to each input channel (expanding from 1 channel to
-// `channel_multiplier` channels for each), then concatenates the results
-// together. Thus, the output has `in_channels * channel_multiplier` channels.
-//
-// ```
-// for k in 0..in_channels-1
-//   for q in 0..channel_multiplier-1
-//     output[b, i, j, k * channel_multiplier + q] =
-//       sum_{di, dj} input[b, strides[1] * i + di, strides[2] * j + dj, k] *
-//                         filter[di, dj, k, q]
-// ```
-//
-// Must have `strides[0] = strides[3] = 1`.  For the most common case of the same
-// horizontal and vertices strides, `strides = [1, stride, stride, 1]`.
-//
-// Arguments:
-//
-//
-//	strides: 1-D of length 4.  The stride of the sliding window for each dimension
-// of `input`.
-//	padding: The type of padding algorithm to use.
-func DepthwiseConv2dNative(scope *Scope, input tf.Output, filter tf.Output, strides []int64, padding string, optional ...DepthwiseConv2dNativeAttr) (output tf.Output) {
-	if scope.Err() != nil {
-		return
-	}
-	attrs := map[string]interface{}{"strides": strides, "padding": padding}
-	for _, a := range optional {
-		a(attrs)
-	}
-	opspec := tf.OpSpec{
-		Type: "DepthwiseConv2dNative",
-		Input: []tf.Input{
-			input, filter,
-		},
-		Attrs: attrs,
-	}
-	op := scope.AddOperation(opspec)
-	return op.Output(0)
 }
 
 // DataFormatDimMapAttr is an optional argument to DataFormatDimMap.
@@ -9731,6 +9643,39 @@ func SegmentMax(scope *Scope, data tf.Output, segment_ids tf.Output) (output tf.
 	return op.Output(0)
 }
 
+// Makes its input available to the next iteration.
+//
+// Arguments:
+//	data: The tensor to be made available to the next iteration.
+//
+// Returns The same tensor as `data`.
+func NextIteration(scope *Scope, data tf.Output) (output tf.Output) {
+	if scope.Err() != nil {
+		return
+	}
+	opspec := tf.OpSpec{
+		Type: "NextIteration",
+		Input: []tf.Input{
+			data,
+		},
+	}
+	op := scope.AddOperation(opspec)
+	return op.Output(0)
+}
+
+// Does nothing. Only useful as a placeholder for control edges.
+//
+// Returns the created operation.
+func NoOp(scope *Scope) (o *tf.Operation) {
+	if scope.Err() != nil {
+		return
+	}
+	opspec := tf.OpSpec{
+		Type: "NoOp",
+	}
+	return scope.AddOperation(opspec)
+}
+
 // Returns the rank of a tensor.
 //
 // This operation returns an integer representing the rank of `input`.
@@ -9967,6 +9912,53 @@ func ParseSingleExample(scope *Scope, serialized tf.Output, dense_defaults []tf.
 		return
 	}
 	return sparse_indices, sparse_values, sparse_shapes, dense_values
+}
+
+// DecodeCompressedAttr is an optional argument to DecodeCompressed.
+type DecodeCompressedAttr func(optionalAttr)
+
+// DecodeCompressedCompressionType sets the optional compression_type attribute to value.
+//
+// value: A scalar containing either (i) the empty string (no
+// compression), (ii) "ZLIB", or (iii) "GZIP".
+// If not specified, defaults to ""
+func DecodeCompressedCompressionType(value string) DecodeCompressedAttr {
+	return func(m optionalAttr) {
+		m["compression_type"] = value
+	}
+}
+
+// Decompress strings.
+//
+// This op decompresses each element of the `bytes` input `Tensor`, which
+// is assumed to be compressed using the given `compression_type`.
+//
+// The `output` is a string `Tensor` of the same shape as `bytes`,
+// each element containing the decompressed data from the corresponding
+// element in `bytes`.
+//
+// Arguments:
+//	bytes: A Tensor of string which is compressed.
+//
+// Returns A Tensor with the same shape as input `bytes`, uncompressed
+// from bytes.
+func DecodeCompressed(scope *Scope, bytes tf.Output, optional ...DecodeCompressedAttr) (output tf.Output) {
+	if scope.Err() != nil {
+		return
+	}
+	attrs := map[string]interface{}{}
+	for _, a := range optional {
+		a(attrs)
+	}
+	opspec := tf.OpSpec{
+		Type: "DecodeCompressed",
+		Input: []tf.Input{
+			bytes,
+		},
+		Attrs: attrs,
+	}
+	op := scope.AddOperation(opspec)
+	return op.Output(0)
 }
 
 // Copy a tensor setting everything outside a central band in each innermost matrix
@@ -17266,7 +17258,7 @@ func SampleDistortedBoundingBoxUseImageIfNoBoundingBoxes(value bool) SampleDisto
 //     # Draw the bounding box in an image summary.
 //     image_with_box = tf.image.draw_bounding_boxes(tf.expand_dims(image, 0),
 //                                                   bbox_for_draw)
-//     tf.image_summary('images_with_box', image_with_box)
+//     tf.summary.image('images_with_box', image_with_box)
 //
 //     # Employ the bounding box to distort the image.
 //     distorted_image = tf.slice(image, begin, size)
@@ -21538,6 +21530,83 @@ func RFFT3D(scope *Scope, input tf.Output, fft_length tf.Output) (output tf.Outp
 	return op.Output(0)
 }
 
+// DepthwiseConv2dNativeAttr is an optional argument to DepthwiseConv2dNative.
+type DepthwiseConv2dNativeAttr func(optionalAttr)
+
+// DepthwiseConv2dNativeDataFormat sets the optional data_format attribute to value.
+//
+// value: Specify the data format of the input and output data. With the
+// default format "NHWC", the data is stored in the order of:
+//     [batch, height, width, channels].
+// Alternatively, the format could be "NCHW", the data storage order of:
+//     [batch, channels, height, width].
+// If not specified, defaults to "NHWC"
+func DepthwiseConv2dNativeDataFormat(value string) DepthwiseConv2dNativeAttr {
+	return func(m optionalAttr) {
+		m["data_format"] = value
+	}
+}
+
+// DepthwiseConv2dNativeDilations sets the optional dilations attribute to value.
+//
+// value: 1-D tensor of length 4.  The dilation factor for each dimension of
+// `input`. If set to k > 1, there will be k-1 skipped cells between each filter
+// element on that dimension. The dimension order is determined by the value of
+// `data_format`, see above for details. Dilations in the batch and depth
+// dimensions must be 1.
+// If not specified, defaults to <i:1 i:1 i:1 i:1 >
+func DepthwiseConv2dNativeDilations(value []int64) DepthwiseConv2dNativeAttr {
+	return func(m optionalAttr) {
+		m["dilations"] = value
+	}
+}
+
+// Computes a 2-D depthwise convolution given 4-D `input` and `filter` tensors.
+//
+// Given an input tensor of shape `[batch, in_height, in_width, in_channels]`
+// and a filter / kernel tensor of shape
+// `[filter_height, filter_width, in_channels, channel_multiplier]`, containing
+// `in_channels` convolutional filters of depth 1, `depthwise_conv2d` applies
+// a different filter to each input channel (expanding from 1 channel to
+// `channel_multiplier` channels for each), then concatenates the results
+// together. Thus, the output has `in_channels * channel_multiplier` channels.
+//
+// ```
+// for k in 0..in_channels-1
+//   for q in 0..channel_multiplier-1
+//     output[b, i, j, k * channel_multiplier + q] =
+//       sum_{di, dj} input[b, strides[1] * i + di, strides[2] * j + dj, k] *
+//                         filter[di, dj, k, q]
+// ```
+//
+// Must have `strides[0] = strides[3] = 1`.  For the most common case of the same
+// horizontal and vertices strides, `strides = [1, stride, stride, 1]`.
+//
+// Arguments:
+//
+//
+//	strides: 1-D of length 4.  The stride of the sliding window for each dimension
+// of `input`.
+//	padding: The type of padding algorithm to use.
+func DepthwiseConv2dNative(scope *Scope, input tf.Output, filter tf.Output, strides []int64, padding string, optional ...DepthwiseConv2dNativeAttr) (output tf.Output) {
+	if scope.Err() != nil {
+		return
+	}
+	attrs := map[string]interface{}{"strides": strides, "padding": padding}
+	for _, a := range optional {
+		a(attrs)
+	}
+	opspec := tf.OpSpec{
+		Type: "DepthwiseConv2dNative",
+		Input: []tf.Input{
+			input, filter,
+		},
+		Attrs: attrs,
+	}
+	op := scope.AddOperation(opspec)
+	return op.Output(0)
+}
+
 // Computes the gradients of 3-D convolution with respect to the input.
 //
 // DEPRECATED at GraphDef version 10: Use Conv3DBackpropInputV2
@@ -22106,6 +22175,47 @@ func FakeQuantWithMinMaxArgsGradient(scope *Scope, gradients tf.Output, inputs t
 		Input: []tf.Input{
 			gradients, inputs,
 		},
+		Attrs: attrs,
+	}
+	op := scope.AddOperation(opspec)
+	return op.Output(0)
+}
+
+// CriticalSectionOpAttr is an optional argument to CriticalSectionOp.
+type CriticalSectionOpAttr func(optionalAttr)
+
+// CriticalSectionOpContainer sets the optional container attribute to value.
+//
+// value: the container this critical section is placed in.
+// If not specified, defaults to ""
+func CriticalSectionOpContainer(value string) CriticalSectionOpAttr {
+	return func(m optionalAttr) {
+		m["container"] = value
+	}
+}
+
+// CriticalSectionOpSharedName sets the optional shared_name attribute to value.
+//
+// value: the name by which this critical section is referred to.
+// If not specified, defaults to ""
+func CriticalSectionOpSharedName(value string) CriticalSectionOpAttr {
+	return func(m optionalAttr) {
+		m["shared_name"] = value
+	}
+}
+
+// Creates a handle to a CriticalSection resource.
+func CriticalSectionOp(scope *Scope, optional ...CriticalSectionOpAttr) (resource tf.Output) {
+	if scope.Err() != nil {
+		return
+	}
+	attrs := map[string]interface{}{}
+	for _, a := range optional {
+		a(attrs)
+	}
+	opspec := tf.OpSpec{
+		Type: "CriticalSectionOp",
+
 		Attrs: attrs,
 	}
 	op := scope.AddOperation(opspec)
@@ -24613,6 +24723,17 @@ func RecordInputFileParallelism(value int64) RecordInputAttr {
 func RecordInputBatchSize(value int64) RecordInputAttr {
 	return func(m optionalAttr) {
 		m["batch_size"] = value
+	}
+}
+
+// RecordInputCompressionType sets the optional compression_type attribute to value.
+//
+// value: The type of compression for the file. Currently ZLIB and
+// GZIP are supported. Defaults to none.
+// If not specified, defaults to ""
+func RecordInputCompressionType(value string) RecordInputAttr {
+	return func(m optionalAttr) {
+		m["compression_type"] = value
 	}
 }
 
@@ -28219,25 +28340,4 @@ func SerializeSparse(scope *Scope, sparse_indices tf.Output, sparse_values tf.Ou
 	}
 	op := scope.AddOperation(opspec)
 	return op.Output(0)
-}
-
-// Table initializer that takes two tensors for keys and values respectively.
-//
-// Arguments:
-//	table_handle: Handle to a table which will be initialized.
-//	keys: Keys of type Tkey.
-//	values: Values of type Tval.
-//
-// Returns the created operation.
-func InitializeTableV2(scope *Scope, table_handle tf.Output, keys tf.Output, values tf.Output) (o *tf.Operation) {
-	if scope.Err() != nil {
-		return
-	}
-	opspec := tf.OpSpec{
-		Type: "InitializeTableV2",
-		Input: []tf.Input{
-			table_handle, keys, values,
-		},
-	}
-	return scope.AddOperation(opspec)
 }

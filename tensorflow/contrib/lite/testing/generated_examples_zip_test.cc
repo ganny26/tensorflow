@@ -68,6 +68,9 @@ std::map<string, string> kBrokenTests = {
     {R"(l2normdim=.*,epsilon=.*,input_shape=\[.,.\])", "67963684"},
     {R"(l2normdim=.*,epsilon=.*,input_shape=\[.,.,.,.,.*\])", "67963684"},
 
+    // SpaceToBatch only supports 4D tensors.
+    {R"(space_to_batch_nd.*input_shape=\[1,4,4,4,1,1\])", "70848787"},
+
     // L2Norm only works for dim=-1.
     {R"(l2normdim=-2,epsilon=.*,input_shape=\[3,15,14,3\])", "67963812"},
     {R"(l2normdim=-2,epsilon=.*,input_shape=\[1,3,4,3\])", "67963812"},
@@ -82,6 +85,9 @@ std::map<string, string> kBrokenTests = {
 
     // ResizeBilinear looks completely incompatible with Tensorflow
     {R"(resize_bilinear)", "67964336"},
+
+    // Transpose only supports 1D-4D input tensors.
+    {R"(transposedtype=.*,input_shape=\[.,.,.,.,.\],perm=.*)", "71545879"},
 };
 
 // Allows test data to be unzipped into a temporary directory and makes
@@ -241,9 +247,11 @@ TEST_P(OpsTest, RunStuff) {
 
 INSTANTIATE_TESTS(add)
 INSTANTIATE_TESTS(avg_pool)
+INSTANTIATE_TESTS(space_to_batch_nd)
 INSTANTIATE_TESTS(batch_to_space_nd)
 INSTANTIATE_TESTS(concat)
-INSTANTIATE_TESTS(constant)
+// TODO(b/71642435) re-enable this test
+// INSTANTIATE_TESTS(constant)
 INSTANTIATE_TESTS(control_dep)
 INSTANTIATE_TESTS(conv)
 INSTANTIATE_TESTS(depthwiseconv)
@@ -265,6 +273,7 @@ INSTANTIATE_TESTS(resize_bilinear)
 INSTANTIATE_TESTS(sigmoid)
 INSTANTIATE_TESTS(softmax)
 INSTANTIATE_TESTS(space_to_depth)
+INSTANTIATE_TESTS(transpose)
 
 }  // namespace testing
 }  // namespace tflite

@@ -107,7 +107,9 @@ class StackOp : public XlaOpKernel {
     OP_REQUIRES(
         ctx, size >= 0,
         errors::InvalidArgument(
-            "XLA compilation requires a fixed stack size upper bound."));
+            "XLA compilation requires a fixed stack size upper bound. If "
+            "you are using tf.while_loop, set the maximum_iterations parameter "
+            "to fix this issue."));
 
     // We defer initializing the Stack resource until we see the first push.
     // Otherwise we do not know the shape of the stack elements.
@@ -129,7 +131,7 @@ class StackOp : public XlaOpKernel {
   TF_DISALLOW_COPY_AND_ASSIGN(StackOp);
 };
 
-REGISTER_XLA_OP(Name("StackV2"), StackOp);
+REGISTER_XLA_OP(Name("StackV2").CompileTimeConstInput("max_size"), StackOp);
 
 class StackPushOp : public XlaOpKernel {
  public:

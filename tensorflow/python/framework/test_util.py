@@ -162,6 +162,16 @@ def assert_meta_graph_protos_equal(tester, a, b):
   # proto comparison below.
   a.ClearField("collection_def")
   b.ClearField("collection_def")
+
+  # Check the graph_defs.
+  assert_equal_graph_def(a.graph_def, b.graph_def, checkpoint_v2=True)
+  # Check graph_def versions (ignored by assert_equal_graph_def).
+  tester.assertProtoEquals(a.graph_def.versions, b.graph_def.versions)
+  # Compared the fields directly, remove their raw values from the
+  # proto comparison below.
+  a.ClearField("graph_def")
+  b.ClearField("graph_def")
+
   tester.assertProtoEquals(a, b)
 
 
@@ -178,7 +188,7 @@ def _strip_checkpoint_v2_randomized(graph_def):
       if attr_tensor_value and len(attr_tensor_value.string_val) == 1:
         attr_tensor_string_value = attr_tensor_value.string_val[0]
         if (attr_tensor_string_value and
-            re.match(_SHARDED_SAVE_OP_PATTERN, attr_tensor_string_value)):
+            re.match(_SHARDED_SAVE_OP_PATTERN, str(attr_tensor_string_value))):
           delete_keys.append(attr_key)
     for attr_key in delete_keys:
       del node.attr[attr_key]
@@ -1369,3 +1379,21 @@ def create_local_cluster(num_workers, num_ps, protocol="grpc",
   ]
 
   return workers, ps_servers
+
+
+def get_node_def_from_graph(node_name, graph_def):
+  """Returns the `NodeDef` instance for given node name in the graph def.
+
+  This method explores only the NodeDefs in `graph_def.node`.
+
+  Args:
+    node_name: Name of the NodeDef to search for.
+    graph_def: An instance of `GraphDef` proto.
+
+  Returns:
+    the `NodeDef` instance whose name field matches the given node_name or None.
+  """
+  for node_def in graph_def.node:
+    if node_def.name == node_name:
+      return node_def
+  return None
