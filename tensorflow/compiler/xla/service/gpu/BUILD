@@ -24,6 +24,15 @@ filegroup(
 load("//tensorflow:tensorflow.bzl", "tf_cc_test")
 
 cc_library(
+    name = "gpu_constants",
+    srcs = ["gpu_constants.cc"],
+    hdrs = ["gpu_constants.h"],
+    deps = [
+        "//tensorflow/compiler/xla:types",
+    ],
+)
+
+cc_library(
     name = "partition_assignment",
     srcs = [
         "partition_assignment.cc",
@@ -123,6 +132,7 @@ cc_library(
     ],
     deps = [
         ":elemental_ir_emitter",
+        ":gpu_constants",
         ":gpu_executable",
         ":hlo_to_ir_bindings",
         ":ir_emission_utils",
@@ -203,6 +213,7 @@ cc_library(
     srcs = ["buffer_allocations.cc"],
     hdrs = ["buffer_allocations.h"],
     deps = [
+        ":gpu_constants",
         "//tensorflow/compiler/xla:status_macros",
         "//tensorflow/compiler/xla:statusor",
         "//tensorflow/compiler/xla:types",
@@ -217,6 +228,7 @@ cc_library(
 cc_library(
     name = "gpu_executable",
     srcs = [
+        "conditional_thunk.cc",
         "convolution_thunk.cc",
         "copy_thunk.cc",
         "cudnn_batchnorm_thunk.cc",
@@ -232,6 +244,7 @@ cc_library(
         "while_thunk.cc",
     ],
     hdrs = [
+        "conditional_thunk.h",
         "convolution_thunk.h",
         "copy_thunk.h",
         "cudnn_batchnorm_thunk.h",
@@ -435,6 +448,7 @@ cc_library(
     deps = [
         ":convolution_folding",
         ":fusion_merger",
+        ":gpu_constants",
         ":gpu_copy_insertion",
         ":gpu_executable",
         ":gpu_hlo_support_checker",
@@ -463,6 +477,7 @@ cc_library(
         "//tensorflow/compiler/xla/service:hlo_constant_folding",
         "//tensorflow/compiler/xla/service:hlo_cse",
         "//tensorflow/compiler/xla/service:hlo_dce",
+        "//tensorflow/compiler/xla/service:hlo_element_type_converter",
         "//tensorflow/compiler/xla/service:hlo_pass",
         "//tensorflow/compiler/xla/service:hlo_pass_pipeline",
         "//tensorflow/compiler/xla/service:hlo_proto",
@@ -499,7 +514,6 @@ cc_library(
         "//tensorflow/compiler/xla:literal_util",
         "//tensorflow/compiler/xla/service:hlo",
         "//tensorflow/compiler/xla/service:hlo_pass",
-        "@llvm//:core",
     ],
 )
 
