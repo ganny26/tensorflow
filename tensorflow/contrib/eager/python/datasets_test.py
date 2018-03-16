@@ -16,11 +16,14 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import threading
 import time
 
 import numpy as np
 
 from tensorflow.contrib import lookup
+from tensorflow.contrib.data.python.ops import threadpool
+from tensorflow.contrib.data.python.ops import unique
 from tensorflow.contrib.eager.python import datasets
 from tensorflow.python.data import Dataset
 from tensorflow.python.eager import test
@@ -41,8 +44,29 @@ class IteratorTest(test.TestCase):
       got.append(t.numpy())
     self.assertAllEqual([0, 1, 2, 3], got)
 
+  def testBasicOneShotIterator(self):
+    got = []
+    for t in Dataset.range(4).make_one_shot_iterator():
+      got.append(t.numpy())
+    self.assertAllEqual([0, 1, 2, 3], got)
+
+  def testBasicImplicitIterator(self):
+    got = []
+    for t in Dataset.range(4):
+      got.append(t.numpy())
+    self.assertAllEqual([0, 1, 2, 3], got)
+
   def testGetNext(self):
     iterator = datasets.Iterator(Dataset.range(4))
+    self.assertEqual(0, iterator.get_next().numpy())
+    self.assertEqual(1, iterator.get_next().numpy())
+    self.assertEqual(2, iterator.get_next().numpy())
+    self.assertEqual(3, iterator.get_next().numpy())
+    with self.assertRaises(errors.OutOfRangeError):
+      iterator.get_next()
+
+  def testGetNextOneShotIterator(self):
+    iterator = Dataset.range(4).make_one_shot_iterator()
     self.assertEqual(0, iterator.get_next().numpy())
     self.assertEqual(1, iterator.get_next().numpy())
     self.assertEqual(2, iterator.get_next().numpy())
@@ -164,6 +188,38 @@ class IteratorTest(test.TestCase):
       x = datasets.Iterator(ds).next()
       x = math_ops.add(x, x)
     self.assertAllEqual([0., 2.], x.numpy())
+
+  def testOverrideThreadPool(self):
+
+    def get_thread_id(_):
+      # Python creates a dummy thread object to represent the current
+      # thread when called from an "alien" thread (such as a
+      # `PrivateThreadPool` thread in this case). It does not include
+      # the TensorFlow-given display name, but it has a unique
+      # identifier that maps one-to-one with the underlying OS thread.
+      return np.array(threading.current_thread().ident).astype(np.int64)
+
+    for num_threads in [1, 2, 4, 8, 16]:
+
+      dataset = (
+          Dataset.range(1000).map(
+              lambda x: script_ops.py_func(get_thread_id, [x], dtypes.int64),
+              num_parallel_calls=32).apply(unique.unique()))
+
+      dataset = threadpool.override_threadpool(
+          dataset,
+          threadpool.PrivateThreadPool(
+              num_threads, display_name='private_thread_pool_%d' % num_threads))
+
+      thread_ids = []
+      for next_element in datasets.Iterator(dataset):
+        thread_ids.append(next_element)
+      self.assertEqual(len(thread_ids), len(set(thread_ids)))
+      self.assertGreater(len(thread_ids), 0)
+      # NOTE(mrry): We don't control the thread pool scheduling, and
+      # so cannot guarantee that all of the threads in the pool will
+      # perform work.
+      self.assertLessEqual(len(thread_ids), num_threads)
 
 
 class DatasetConstructorBenchmark(test.Benchmark):

@@ -30,6 +30,7 @@ from tensorflow.python.framework import errors_impl
 from tensorflow.python.framework import importer
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import tensor_shape
+from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import gradient_checker
 from tensorflow.python.ops import logging_ops
@@ -179,6 +180,11 @@ class ConstantTest(test.TestCase):
           np.arange(-15, 15).reshape([2, 3, 5]).astype(np.float32),
           shape=[2, 3, 5])
     self.assertEqual(c.get_shape(), [2, 3, 5])
+
+  @test_util.assert_no_new_pyobjects_executing_eagerly
+  def testEagerMemory(self):
+    """Tests PyObject refs are managed correctly when executing eagerly."""
+    constant_op.constant([[1.]])
 
   def testImplicitShapeNumPy(self):
     with ops.Graph().as_default():
@@ -465,9 +471,8 @@ class ZerosLikeTest(test.TestCase):
   def testZerosLikeGPU(self):
     for dtype in [
         dtypes_lib.half, dtypes_lib.float32, dtypes_lib.float64,
-        dtypes_lib.int32, dtypes_lib.int64,
-        dtypes_lib.complex64, dtypes_lib.complex128,
-        dtypes_lib.bool
+        dtypes_lib.int32, dtypes_lib.int64, dtypes_lib.complex64,
+        dtypes_lib.complex128, dtypes_lib.bool
     ]:
       self._compareZeros(dtype, fully_defined_shape=False, use_gpu=True)
       self._compareZeros(dtype, fully_defined_shape=True, use_gpu=True)
