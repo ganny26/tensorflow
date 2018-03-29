@@ -578,9 +578,11 @@ class BaseSaverBuilder(object):
           names_to_saveables[name] = [var]
       elif (isinstance(var, checkpointable.CheckpointableBase)
             and not isinstance(var, variables.Variable)):
+        checkpointable_saveables = [
+            (factory() if callable(factory) else factory)
+            for factory in var._gather_saveables_for_checkpoint().values()]
         names_to_saveables.update(
-            BaseSaverBuilder.OpListToDict(
-                list(var._gather_saveables_for_checkpoint().values())))
+            BaseSaverBuilder.OpListToDict(checkpointable_saveables))
       else:
         if context.executing_eagerly():
           if not isinstance(var, resource_variable_ops.ResourceVariable):
@@ -1968,7 +1970,7 @@ def export_meta_graph(filename=None,
     saver_def: `SaverDef` protocol buffer.
     collection_list: List of string keys to collect.
     as_text: If `True`, writes the `MetaGraphDef` as an ASCII proto.
-    graph: The `Graph` to import into. If `None`, use the default graph.
+    graph: The `Graph` to export. If `None`, use the default graph.
     export_scope: Optional `string`. Name scope under which to extract
       the subgraph. The scope name will be striped from the node definitions
       for easy import later into new name scopes. If `None`, the whole graph
