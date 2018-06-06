@@ -1544,7 +1544,7 @@ def precision_recall_at_equal_thresholds(labels,
     result: A named tuple (See PrecisionRecallData within the implementation of
       this function) with properties that are variables of shape
       `[num_thresholds]`. The names of the properties are tp, fp, tn, fn,
-      precision, recall, thresholds.
+      precision, recall, thresholds. Types are same as that of predictions.
     update_op: An op that accumulates values.
 
   Raises:
@@ -1570,7 +1570,6 @@ def precision_recall_at_equal_thresholds(labels,
 
   check_ops.assert_type(labels, dtypes.bool)
 
-  dtype = predictions.dtype
   with variable_scope.variable_scope(name,
                                      'precision_recall_at_equal_thresholds',
                                      (labels, predictions, weights)):
@@ -1592,11 +1591,16 @@ def precision_recall_at_equal_thresholds(labels,
 
     predictions.get_shape().assert_is_compatible_with(labels.get_shape())
 
-    # We cast to float to ensure we have 0.0 or 1.0.
-    f_labels = math_ops.cast(labels, dtype)
+    # It's important we aggregate using float64 since we're accumulating a lot
+    # of 1.0's for the true/false labels, and accumulating to float32 will
+    # be quite inaccurate even with just a modest amount of values (~20M).
+    # We use float64 instead of integer primarily since GPU scatter kernel
+    # only support floats.
+    agg_dtype = dtypes.float64
 
-    # Get weighted true/false labels.
-    true_labels = f_labels * weights
+    f_labels = math_ops.cast(labels, agg_dtype)
+    weights = math_ops.cast(weights, agg_dtype)
+    true_labels = f_labels  * weights
     false_labels = (1.0 - f_labels) * weights
 
     # Flatten predictions and labels.
@@ -1638,9 +1642,9 @@ def precision_recall_at_equal_thresholds(labels,
 
     with ops.name_scope('variables'):
       tp_buckets_v = metrics_impl.metric_variable(
-          [num_thresholds], dtype, name='tp_buckets')
+          [num_thresholds], agg_dtype, name='tp_buckets')
       fp_buckets_v = metrics_impl.metric_variable(
-          [num_thresholds], dtype, name='fp_buckets')
+          [num_thresholds], agg_dtype, name='fp_buckets')
 
     with ops.name_scope('update_op'):
       update_tp = state_ops.scatter_add(
@@ -1660,18 +1664,21 @@ def precision_recall_at_equal_thresholds(labels,
     fn = tp[0] - tp
 
     # We use a minimum to prevent division by 0.
-    epsilon = 1e-7
+    epsilon = ops.convert_to_tensor(1e-7, dtype=agg_dtype)
     precision = tp / math_ops.maximum(epsilon, tp + fp)
     recall = tp / math_ops.maximum(epsilon, tp + fn)
 
+    # Convert all tensors back to predictions' dtype (as per function contract).
+    out_dtype = predictions.dtype
+    _convert = lambda tensor: math_ops.cast(tensor, out_dtype)
     result = PrecisionRecallData(
-        tp=tp,
-        fp=fp,
-        tn=tn,
-        fn=fn,
-        precision=precision,
-        recall=recall,
-        thresholds=math_ops.lin_space(0.0, 1.0, num_thresholds))
+        tp=_convert(tp),
+        fp=_convert(fp),
+        tn=_convert(tn),
+        fn=_convert(fn),
+        precision=_convert(precision),
+        recall=_convert(recall),
+        thresholds=_convert(math_ops.lin_space(0.0, 1.0, num_thresholds)))
     update_op = control_flow_ops.group(update_tp, update_fp)
     return result, update_op
 
@@ -2496,7 +2503,7 @@ def _compute_recall_at_precision(tp, fp, fn, precision, name):
     name: An optional variable_scope name.
 
   Returns:
-    The recall at a the given `precision`.
+    The recall at a given `precision`.
   """
   precisions = math_ops.div(tp, tp + fp + _EPSILON)
   tf_index = math_ops.argmin(
@@ -2586,6 +2593,121 @@ def recall_at_precision(labels,
       ops.add_to_collections(updates_collections, update_op)
 
     return recall, update_op
+
+
+def precision_at_recall(labels,
+                        predictions,
+                        target_recall,
+                        weights=None,
+                        num_thresholds=200,
+                        metrics_collections=None,
+                        updates_collections=None,
+                        name=None):
+  """Computes the precision at a given recall.
+
+  This function creates variables to track the true positives, false positives,
+  true negatives, and false negatives at a set of thresholds. Among those
+  thresholds where recall is at least `target_recall`, precision is computed
+  at the threshold where recall is closest to `target_recall`.
+
+  For estimation of the metric over a stream of data, the function creates an
+  `update_op` operation that updates these variables and returns the
+  precision at `target_recall`. `update_op` increments the counts of true
+  positives, false positives, true negatives, and false negatives with the
+  weight of each case found in the `predictions` and `labels`.
+
+  If `weights` is `None`, weights default to 1. Use weights of 0 to mask values.
+
+  For additional information about precision and recall, see
+  http://en.wikipedia.org/wiki/Precision_and_recall
+
+  Args:
+    labels: The ground truth values, a `Tensor` whose dimensions must match
+      `predictions`. Will be cast to `bool`.
+    predictions: A floating point `Tensor` of arbitrary shape and whose values
+      are in the range `[0, 1]`.
+    target_recall: A scalar value in range `[0, 1]`.
+    weights: Optional `Tensor` whose rank is either 0, or the same rank as
+      `labels`, and must be broadcastable to `labels` (i.e., all dimensions must
+      be either `1`, or the same as the corresponding `labels` dimension).
+    num_thresholds: The number of thresholds to use for matching the given
+      recall.
+    metrics_collections: An optional list of collections to which `precision`
+      should be added.
+    updates_collections: An optional list of collections to which `update_op`
+      should be added.
+    name: An optional variable_scope name.
+
+  Returns:
+    precision: A scalar `Tensor` representing the precision at the given
+      `target_recall` value.
+    update_op: An operation that increments the variables for tracking the
+      true positives, false positives, true negatives, and false negatives and
+      whose value matches `precision`.
+
+  Raises:
+    ValueError: If `predictions` and `labels` have mismatched shapes, if
+      `weights` is not `None` and its shape doesn't match `predictions`, or if
+      `target_recall` is not between 0 and 1, or if either `metrics_collections`
+      or `updates_collections` are not a list or tuple.
+    RuntimeError: If eager execution is enabled.
+  """
+  if context.executing_eagerly():
+    raise RuntimeError('tf.metrics.precision_at_recall is not '
+                       'supported when eager execution is enabled.')
+
+  if target_recall < 0 or target_recall > 1:
+    raise ValueError('`target_recall` must be in the range [0, 1].')
+
+  with variable_scope.variable_scope(name, 'precision_at_recall',
+                                     (predictions, labels, weights)):
+    kepsilon = 1e-7  # Used to avoid division by zero.
+    thresholds = [
+        (i + 1) * 1.0 / (num_thresholds - 1) for i in range(num_thresholds - 2)
+    ]
+    thresholds = [0.0 - kepsilon] + thresholds + [1.0 + kepsilon]
+
+    values, update_ops = _streaming_confusion_matrix_at_thresholds(
+        predictions, labels, thresholds, weights)
+
+    def compute_precision_at_recall(tp, fp, fn, name):
+      """Computes the precision at a given recall.
+
+      Args:
+        tp: True positives.
+        fp: False positives.
+        fn: False negatives.
+        name: A name for the operation.
+
+      Returns:
+        The precision at the desired recall.
+      """
+      recalls = math_ops.div(tp, tp + fn + kepsilon)
+
+      # Because recall is monotone decreasing as a function of the threshold,
+      # the smallest recall exceeding target_recall occurs at the largest
+      # threshold where recall >= target_recall.
+      admissible_recalls = math_ops.cast(
+          math_ops.greater_equal(recalls, target_recall), dtypes.int64)
+      tf_index = math_ops.reduce_sum(admissible_recalls) - 1
+
+      # Now we have the threshold at which to compute precision:
+      return math_ops.div(tp[tf_index] + kepsilon,
+                          tp[tf_index] + fp[tf_index] + kepsilon,
+                          name)
+
+    precision_value = compute_precision_at_recall(
+        values['tp'], values['fp'], values['fn'], 'value')
+    update_op = compute_precision_at_recall(
+        update_ops['tp'], update_ops['fp'], update_ops['fn'], 'update_op')
+
+    if metrics_collections:
+      ops.add_to_collections(metrics_collections, precision_value)
+
+    if updates_collections:
+      ops.add_to_collections(updates_collections, update_op)
+
+    return precision_value, update_op
 
 
 def streaming_sparse_average_precision_at_k(predictions,
@@ -3243,7 +3365,7 @@ def streaming_mean_cosine_distance(predictions,
   radial_diffs = math_ops.reduce_sum(
       radial_diffs, reduction_indices=[
           dim,
-      ], keep_dims=True)
+      ], keepdims=True)
   mean_distance, update_op = streaming_mean(radial_diffs, weights, None, None,
                                             name or 'mean_cosine_distance')
   mean_distance = math_ops.subtract(1.0, mean_distance)

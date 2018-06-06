@@ -1536,6 +1536,7 @@ def convolution3d_transpose(
 @add_arg_scope
 def dense_to_sparse(tensor, eos_token=0, outputs_collections=None, scope=None):
   """Converts a dense tensor into a sparse tensor.
+
   An example use would be to convert dense labels to sparse ones
   so that they can be fed to the ctc_loss.
 
@@ -2021,6 +2022,7 @@ class GDN(base.Layer):
 
     def beta_initializer(shape, dtype=None, partition_info=None):
       del partition_info  # unused
+      pedestal = array_ops.constant(self._reparam_offset**2, dtype=self.dtype)
       return math_ops.sqrt(array_ops.ones(shape, dtype=dtype) + pedestal)
 
     def gamma_initializer(shape, dtype=None, partition_info=None):
@@ -2028,6 +2030,7 @@ class GDN(base.Layer):
       assert len(shape) == 2
       assert shape[0] == shape[1]
       eye = linalg_ops.eye(shape[0], dtype=dtype)
+      pedestal = array_ops.constant(self._reparam_offset**2, dtype=self.dtype)
       return math_ops.sqrt(self._gamma_init * eye + pedestal)
 
     beta = self.add_variable(
@@ -2323,11 +2326,16 @@ def images_to_sequence(inputs,
                        outputs_collections=None,
                        scope=None):
   """Convert a batch of images into a batch of sequences.
+
   Args:
     inputs: a (num_images, height, width, depth) tensor
     data_format: A string. `NHWC` (default) and `NCHW` are supported.
     outputs_collections: The collections to which the outputs are added.
     scope: Optional scope for name_scope.
+
+  Raises:
+     ValueError: If `data_format` is not either NCHW or NHWC.
+
   Returns:
     (width, num_images*height, depth) sequence tensor
   """
@@ -2833,6 +2841,7 @@ def sequence_to_images(inputs,
                        outputs_collections=None,
                        scope=None):
   """Convert a batch of sequences into a batch of images.
+
   Args:
     inputs: (num_steps, num_batches, depth) sequence tensor
     height: the height of the images
@@ -2840,6 +2849,7 @@ def sequence_to_images(inputs,
       Currently supports `'channels_first'` and `'channels_last'`.
     outputs_collections: The collections to which the outputs are added.
     scope: Optional scope for name_scope.
+
   Returns:
     A tensor representing the output of the operation.
   """
@@ -2849,7 +2859,7 @@ def sequence_to_images(inputs,
     if num_batches is None:
       num_batches = -1
     else:
-      num_batches = num_batches // height
+      num_batches //= height
     reshaped = array_ops.reshape(inputs,
                                  [width, num_batches, height, depth])
     if output_data_format == 'channels_first':

@@ -139,6 +139,7 @@ DECLARE_GRAPH_TRANSFORMATION(PropagateFakeQuantNumBits);
 DECLARE_GRAPH_TRANSFORMATION(PropagateFixedSizes)
 DECLARE_GRAPH_TRANSFORMATION(HardcodeMinMax)
 DECLARE_GRAPH_TRANSFORMATION(Quantize)
+DECLARE_GRAPH_TRANSFORMATION(QuantizeWeights)
 DECLARE_GRAPH_TRANSFORMATION(RemoveFinalDequantizeOp)
 DECLARE_GRAPH_TRANSFORMATION(RemoveTensorFlowAssert)
 DECLARE_GRAPH_TRANSFORMATION(RemoveTensorFlowIdentity)
@@ -174,6 +175,7 @@ DECLARE_GRAPH_TRANSFORMATION(UnrollBatchMatMul)
 DECLARE_GRAPH_TRANSFORMATION(ResolveSpaceToBatchNDAttributes)
 DECLARE_GRAPH_TRANSFORMATION(ResolveBatchToSpaceNDAttributes)
 DECLARE_GRAPH_TRANSFORMATION(ResolvePadAttributes)
+DECLARE_GRAPH_TRANSFORMATION(ResolvePadV2Attributes)
 DECLARE_GRAPH_TRANSFORMATION(ResolveStridedSliceAttributes)
 DECLARE_GRAPH_TRANSFORMATION(ResolveSliceAttributes)
 DECLARE_GRAPH_TRANSFORMATION(ResolveMeanAttributes)
@@ -181,6 +183,7 @@ DECLARE_GRAPH_TRANSFORMATION(ResolveTransposeAttributes)
 DECLARE_GRAPH_TRANSFORMATION(ResolveConstantRandomUniform)
 DECLARE_GRAPH_TRANSFORMATION(ResolveConstantRange)
 DECLARE_GRAPH_TRANSFORMATION(ResolveConstantShapeOrRank)
+DECLARE_GRAPH_TRANSFORMATION(ResolveConstantSlice)
 DECLARE_GRAPH_TRANSFORMATION(ResolveConstantStack)
 DECLARE_GRAPH_TRANSFORMATION(ResolveConstantStridedSlice)
 DECLARE_GRAPH_TRANSFORMATION(ResolveConstantFill)
@@ -189,6 +192,24 @@ DECLARE_GRAPH_TRANSFORMATION(ResolveMultiplyByZero)
 DECLARE_GRAPH_TRANSFORMATION(Dequantize)
 DECLARE_GRAPH_TRANSFORMATION(UnpartitionEmbeddingLookup)
 DECLARE_GRAPH_TRANSFORMATION(ExperimentalShuffleFCWeights)
+
+class PropagateDefaultMinMax : public GraphTransformation {
+ public:
+  bool Run(Model* model, std::size_t op_index) override;
+  const char* Name() const override { return "PropagateDefaultMinMax"; }
+
+  bool has_any_ranges_defined() const { return !type_ranges_.empty(); }
+  void DefineTypeRange(ArrayDataType data_type, double min, double max) {
+    MinMax minmax;
+    minmax.min = min;
+    minmax.max = max;
+    type_ranges_.emplace_back(data_type, minmax);
+  }
+
+ private:
+  bool SetArrayMinMax(const string& array_name, Array* array);
+  std::vector<std::pair<ArrayDataType, MinMax>> type_ranges_;
+};
 
 class ResolveReshapeAttributes : public GraphTransformation {
  public:
@@ -226,6 +247,19 @@ class ResolveConstantFakeQuant : public GraphTransformation {
 
  private:
   bool propagate_fake_quant_num_bits_ = false;
+};
+
+class EnsureUint8WeightsSafeForFastInt8Kernels : public GraphTransformation {
+ public:
+  bool Run(Model* model, std::size_t op_index) override;
+  const char* Name() const override {
+    return "EnsureUint8WeightsSafeForFastInt8Kernels";
+  }
+  bool allow_nudging_weights() const { return allow_nudging_weights_; }
+  void set_allow_nudging_weights(bool val) { allow_nudging_weights_ = val; }
+
+ private:
+  bool allow_nudging_weights_ = false;
 };
 
 #undef DECLARE_GRAPH_TRANSFORMATION

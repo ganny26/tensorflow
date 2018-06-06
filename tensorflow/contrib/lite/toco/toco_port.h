@@ -33,14 +33,37 @@ limitations under the License.
 #define TFLITE_PROTO_NS google::protobuf
 #endif
 
+#ifdef __ANDROID__
+#include <sstream>
+namespace std {
+
+template <typename T>
+std::string to_string(T value)
+{
+    std::ostringstream os ;
+    os << value ;
+    return os.str() ;
+}
+
+#ifdef __ARM_ARCH_7A__
+double round(double x);
+#endif
+}
+#endif
+
 namespace toco {
 namespace port {
 
 class Status {
  public:
+  static Status OK() { return Status(true, ""); }
+
+  // Create a failed status with no message.
   Status() {}
 
   Status(bool ok, const string& message) : ok_(ok), message_(message) {}
+
+  void AppendMessage(const string& message) { message_ += message; }
 
   bool ok() const { return ok_; }
 
@@ -75,6 +98,14 @@ Status Exists(const string& filename, const Options& options);
 void CopyToBuffer(const ::Cord& src, char* dest);
 #endif  // PLATFORM_GOOGLE
 void CopyToBuffer(const string& src, char* dest);
+
+inline uint32 ReverseBits32(uint32 n) {
+  n = ((n >> 1) & 0x55555555) | ((n & 0x55555555) << 1);
+  n = ((n >> 2) & 0x33333333) | ((n & 0x33333333) << 2);
+  n = ((n >> 4) & 0x0F0F0F0F) | ((n & 0x0F0F0F0F) << 4);
+  return (((n & 0xFF) << 24) | ((n & 0xFF00) << 8) | ((n & 0xFF0000) >> 8) |
+          ((n & 0xFF000000) >> 24));
+}
 }  // namespace port
 
 inline bool ParseFromStringOverload(const std::string& in,

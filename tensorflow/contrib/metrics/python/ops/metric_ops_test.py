@@ -2333,47 +2333,24 @@ class StreamingPrecisionRecallAtEqualThresholdsTest(test.TestCase):
     np.random.seed(1)
     ops.reset_default_graph()
 
-  def _testResultsEqual(self, expected_dict, gotten_result):
+  def _testResultsEqual(self, expected_dict, gotten_result, eps=None):
     """Tests that 2 results (dicts) represent the same data.
 
     Args:
       expected_dict: A dictionary with keys that are the names of properties
         of PrecisionRecallData and whose values are lists of floats.
       gotten_result: A PrecisionRecallData object.
+      eps: Epsilon value to use for testing output values. If unspecified, use
+        default from assertAllClose.
     """
     gotten_dict = {k: t.eval() for k, t in gotten_result._asdict().items()}
     self.assertItemsEqual(list(expected_dict.keys()), list(gotten_dict.keys()))
 
     for key, expected_values in expected_dict.items():
-      self.assertAllClose(expected_values, gotten_dict[key])
-
-  def _testCase(self, predictions, labels, expected_result, weights=None):
-    """Performs a test given a certain scenario of labels, predictions, weights.
-
-    Args:
-      predictions: The predictions tensor. Of type float32.
-      labels: The labels tensor. Of type bool.
-      expected_result: The expected result (dict) that maps to tensors.
-      weights: Optional weights tensor.
-    """
-    with self.test_session() as sess:
-      predictions_tensor = constant_op.constant(
-          predictions, dtype=dtypes_lib.float32)
-      labels_tensor = constant_op.constant(labels, dtype=dtypes_lib.bool)
-      weights_tensor = None
-      if weights:
-        weights_tensor = constant_op.constant(weights, dtype=dtypes_lib.float32)
-      gotten_result, update_op = (
-          metric_ops.precision_recall_at_equal_thresholds(
-              labels=labels_tensor,
-              predictions=predictions_tensor,
-              weights=weights_tensor,
-              num_thresholds=3))
-
-      sess.run(variables.local_variables_initializer())
-      sess.run(update_op)
-
-      self._testResultsEqual(expected_result, gotten_result)
+      if eps is not None:
+        self.assertAllClose(expected_values, gotten_dict[key], atol=eps)
+      else:
+        self.assertAllClose(expected_values, gotten_dict[key])
 
   def testVars(self):
     metric_ops.precision_recall_at_equal_thresholds(
@@ -2413,6 +2390,77 @@ class StreamingPrecisionRecallAtEqualThresholdsTest(test.TestCase):
       }
       for _ in range(3):
         self._testResultsEqual(initial_result, result)
+
+  def testLargeCase(self):
+    shape = [32, 512, 256, 1]
+    predictions = random_ops.random_uniform(
+        shape, 0.0, 1.0, dtype=dtypes_lib.float32)
+    labels = math_ops.greater(random_ops.random_uniform(shape, 0.0, 1.0), 0.5)
+
+    result, update_op = metric_ops.precision_recall_at_equal_thresholds(
+        labels=labels, predictions=predictions, num_thresholds=201)
+    # Run many updates, enough to cause highly inaccurate values if the
+    # code used float32 for accumulation.
+    num_updates = 71
+
+    with self.test_session() as sess:
+      sess.run(variables.local_variables_initializer())
+      for _ in xrange(num_updates):
+        sess.run(update_op)
+
+      prdata = sess.run(result)
+
+      # Since we use random values, we won't know the tp/fp/tn/fn values, but
+      # tp and fp at threshold 0 should be the total number of positive and
+      # negative labels, hence their sum should be total number of pixels.
+      expected_value = 1.0 * np.product(shape) * num_updates
+      got_value = prdata.tp[0] + prdata.fp[0]
+      # They should be at least within 1.
+      self.assertNear(got_value, expected_value, 1.0)
+
+  def _testCase(self,
+                predictions,
+                labels,
+                expected_result,
+                dtype=dtypes_lib.float32,
+                eps=None,
+                weights=None):
+    """Performs a test given a certain scenario of labels, predictions, weights.
+
+    Args:
+      predictions: The predictions tensor. Of type dtype.
+      labels: The labels tensor. Of type bool.
+      expected_result: The expected result (dict) that maps to tensors.
+      dtype: Data type to use for predictions and weights tensor. Default
+        is float32.
+      eps: Epsilon value to use for testing output values. If unspecified, use
+        default from assertAllClose.
+      weights: Optional weights tensor.
+    """
+    with self.test_session() as sess:
+      predictions_tensor = constant_op.constant(predictions, dtype=dtype)
+      labels_tensor = constant_op.constant(labels, dtype=dtypes_lib.bool)
+      weights_tensor = None
+      if weights:
+        weights_tensor = constant_op.constant(weights, dtype=dtype)
+      gotten_result, update_op = (
+          metric_ops.precision_recall_at_equal_thresholds(
+              labels=labels_tensor,
+              predictions=predictions_tensor,
+              weights=weights_tensor,
+              num_thresholds=3))
+      self.assertEqual(gotten_result.tp.dtype, dtype)
+      self.assertEqual(gotten_result.fp.dtype, dtype)
+      self.assertEqual(gotten_result.tn.dtype, dtype)
+      self.assertEqual(gotten_result.fn.dtype, dtype)
+      self.assertEqual(gotten_result.precision.dtype, dtype)
+      self.assertEqual(gotten_result.recall.dtype, dtype)
+      self.assertEqual(gotten_result.thresholds.dtype, dtype)
+
+      sess.run(variables.local_variables_initializer())
+      sess.run(update_op)
+
+      self._testResultsEqual(expected_result, gotten_result, eps=eps)
 
   def testAllTruePositives(self):
     self._testCase(
@@ -2488,6 +2536,35 @@ class StreamingPrecisionRecallAtEqualThresholdsTest(test.TestCase):
             'thresholds': [0.0, 0.5, 1.0],
         },
         weights=[[0.0, 0.5, 2.0, 0.0, 0.5, 1.0]])
+
+  def testFloat64(self):
+    self._testCase(
+        [[0.2, 0.3, 0.4, 0.6, 0.7, 0.8]],
+        [[True, False, False, True, True, True]], {
+            'tp': [4, 3, 0],
+            'fp': [2, 0, 0],
+            'tn': [0, 2, 2],
+            'fn': [0, 1, 4],
+            'precision': [2.0 / 3.0, 1.0, 0.0],
+            'recall': [1.0, 0.75, 0.0],
+            'thresholds': [0.0, 0.5, 1.0],
+        },
+        dtype=dtypes_lib.float64)
+
+  def testFloat16(self):
+    self._testCase(
+        [[0.2, 0.3, 0.4, 0.6, 0.7, 0.8]],
+        [[True, False, False, True, True, True]], {
+            'tp': [4, 3, 0],
+            'fp': [2, 0, 0],
+            'tn': [0, 2, 2],
+            'fn': [0, 1, 4],
+            'precision': [2.0 / 3.0, 1.0, 0.0],
+            'recall': [1.0, 0.75, 0.0],
+            'thresholds': [0.0, 0.5, 1.0],
+        },
+        dtype=dtypes_lib.float16,
+        eps=1e-3)
 
 
 class StreamingSpecificityAtSensitivityTest(test.TestCase):
@@ -3378,6 +3455,138 @@ class RecallAtPrecisionTest(test.TestCase):
       target_recall = 2.0 / 3.0
       self.assertAlmostEqual(target_recall, sess.run(update_op))
       self.assertAlmostEqual(target_recall, recall.eval())
+
+
+class PrecisionAtRecallTest(test.TestCase):
+
+  def setUp(self):
+    np.random.seed(1)
+    ops.reset_default_graph()
+
+  def testVars(self):
+    metrics.precision_at_recall(
+        predictions=array_ops.ones((10, 1)),
+        labels=array_ops.ones((10, 1)),
+        target_recall=0.7)
+    _assert_metric_variables(self,
+                             ('precision_at_recall/true_positives:0',
+                              'precision_at_recall/false_negatives:0',
+                              'precision_at_recall/false_positives:0',
+                              'precision_at_recall/true_negatives:0'))
+
+  def testMetricsCollection(self):
+    my_collection_name = '__metrics__'
+    mean, _ = metrics.precision_at_recall(
+        predictions=array_ops.ones((10, 1)),
+        labels=array_ops.ones((10, 1)),
+        target_recall=0.7,
+        metrics_collections=[my_collection_name])
+    self.assertListEqual(ops.get_collection(my_collection_name), [mean])
+
+  def testUpdatesCollection(self):
+    my_collection_name = '__updates__'
+    _, update_op = metrics.precision_at_recall(
+        predictions=array_ops.ones((10, 1)),
+        labels=array_ops.ones((10, 1)),
+        target_recall=0.7,
+        updates_collections=[my_collection_name])
+    self.assertListEqual(ops.get_collection(my_collection_name), [update_op])
+
+  def testValueTensorIsIdempotent(self):
+    predictions = random_ops.random_uniform(
+        (10, 3), maxval=1, dtype=dtypes_lib.float32, seed=1)
+    labels = random_ops.random_uniform(
+        (10, 3), maxval=2, dtype=dtypes_lib.int64, seed=1)
+    precision, update_op = metrics.precision_at_recall(
+        labels, predictions, target_recall=0.7)
+
+    with self.test_session() as sess:
+      sess.run(variables.local_variables_initializer())
+
+      # Run several updates.
+      for _ in range(10):
+        sess.run(update_op)
+
+      # Then verify idempotency.
+      initial_precision = precision.eval()
+      for _ in range(10):
+        self.assertAlmostEqual(initial_precision, precision.eval(), places=5)
+
+  def testAllCorrect(self):
+    inputs = np.random.randint(0, 2, size=(100, 1))
+
+    predictions = constant_op.constant(inputs, dtype=dtypes_lib.float32)
+    labels = constant_op.constant(inputs)
+    precision, update_op = metrics.precision_at_recall(
+        labels, predictions, target_recall=0.7)
+
+    with self.test_session() as sess:
+      sess.run(variables.local_variables_initializer())
+      self.assertEqual(1, sess.run(update_op))
+      self.assertEqual(1, precision.eval())
+
+  def testAllIncorrect(self):
+    inputs = np.random.randint(0, 2, size=(100, 1))
+
+    predictions = constant_op.constant(inputs, dtype=dtypes_lib.float32)
+    labels = 1.0 - predictions
+    label_prior = math_ops.reduce_mean(labels)
+    precision, update_op = metrics.precision_at_recall(
+        labels, predictions, target_recall=0.2)
+
+    with self.test_session() as sess:
+      sess.run(variables.local_variables_initializer())
+      self.assertEqual(sess.run(label_prior), sess.run(update_op))
+      self.assertEqual(sess.run(label_prior), precision.eval())
+
+  def testSomeCorrectHighRecall(self):
+    predictions_values = [0.1, 0.2, 0.5, 0.3, 0.0, 0.1, 0.45, 0.5, 0.8, 0.9]
+    labels_values = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+
+    predictions = constant_op.constant(
+        predictions_values, dtype=dtypes_lib.float32)
+    labels = constant_op.constant(labels_values)
+    precision, update_op = metrics.precision_at_recall(
+        labels, predictions, target_recall=0.8)
+
+    with self.test_session() as sess:
+      sess.run(variables.local_variables_initializer())
+      self.assertAlmostEqual(0.8, sess.run(update_op))
+      self.assertAlmostEqual(0.8, precision.eval())
+
+  def testSomeCorrectLowRecall(self):
+    predictions_values = [0.1, 0.2, 0.7, 0.3, 0.0, 0.1, 0.45, 0.5, 0.6, 0.9]
+    labels_values = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+
+    predictions = constant_op.constant(
+        predictions_values, dtype=dtypes_lib.float32)
+    labels = constant_op.constant(labels_values)
+    precision, update_op = metrics.precision_at_recall(
+        labels, predictions, target_recall=0.4)
+
+    with self.test_session() as sess:
+      sess.run(variables.local_variables_initializer())
+      self.assertAlmostEqual(2.0/3, sess.run(update_op))
+      self.assertAlmostEqual(2.0/3, precision.eval())
+
+  def testWeighted_multipleLabelDtypes(self):
+    for label_dtype in (dtypes_lib.bool, dtypes_lib.int32, dtypes_lib.float32):
+      predictions_values = [
+          0.0, 0.1, 0.2, 0.3, 0.4, 0.1, 0.22, 0.25, 0.31, 0.35]
+      labels_values = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+      weights_values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+      predictions = constant_op.constant(
+          predictions_values, dtype=dtypes_lib.float32)
+      labels = math_ops.cast(labels_values, dtype=label_dtype)
+      weights = constant_op.constant(weights_values)
+      precision, update_op = metrics.precision_at_recall(
+          labels, predictions, target_recall=0.8, weights=weights)
+
+      with self.test_session() as sess:
+        sess.run(variables.local_variables_initializer())
+        self.assertAlmostEqual(34.0/43, sess.run(update_op))
+        self.assertAlmostEqual(34.0/43, precision.eval())
 
 
 class StreamingFNRThresholdsTest(test.TestCase):
@@ -6969,6 +7178,14 @@ class CohenKappaTest(test.TestCase):
     with self.assertRaises(ValueError):
       metrics.cohen_kappa(labels, invalid_predictions, 3)
 
+  def testConditionalPackingOptimization(self):
+    placeholder = array_ops.placeholder(dtypes_lib.float32, [None])
+    values, update_op = metric_ops.streaming_concat(placeholder)
+    with self.test_session() as sess:
+      sess.run(variables.local_variables_initializer())
+      for feed in range(10):
+        sess.run(update_op, feed_dict={placeholder: [feed]})
+        print(sess.run(values))
 
 if __name__ == '__main__':
   test.main()

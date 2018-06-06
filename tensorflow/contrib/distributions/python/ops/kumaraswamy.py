@@ -31,7 +31,6 @@ from tensorflow.python.ops import special_math_ops
 from tensorflow.python.ops.distributions import distribution
 from tensorflow.python.ops.distributions import transformed_distribution
 from tensorflow.python.ops.distributions import uniform
-from tensorflow.python.util.tf_export import tf_export
 
 __all__ = [
     "Kumaraswamy",
@@ -59,7 +58,6 @@ def _harmonic_number(x):
   return math_ops.digamma(x + one) - math_ops.digamma(one)
 
 
-@tf_export("distributions.Kumaraswamy")
 class Kumaraswamy(transformed_distribution.TransformedDistribution):
   """Kumaraswamy distribution.
 
@@ -151,10 +149,11 @@ class Kumaraswamy(transformed_distribution.TransformedDistribution):
         more of the statistic's batch members are undefined.
       name: Python `str` name prefixed to Ops created by this class.
     """
-    concentration1 = ops.convert_to_tensor(
-        concentration1, name="concentration1")
-    concentration0 = ops.convert_to_tensor(
-        concentration0, name="concentration0")
+    with ops.name_scope(name, values=[concentration1, concentration0]) as name:
+      concentration1 = ops.convert_to_tensor(
+          concentration1, name="concentration1")
+      concentration0 = ops.convert_to_tensor(
+          concentration0, name="concentration0")
     super(Kumaraswamy, self).__init__(
         distribution=uniform.Uniform(
             low=array_ops.zeros([], dtype=concentration1.dtype),
