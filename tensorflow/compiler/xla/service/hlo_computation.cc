@@ -64,7 +64,7 @@ HloComputation::HloComputation(
     const string& name, int parameter_count,
     std::vector<std::unique_ptr<HloInstruction>>* instructions,
     HloInstruction* root_instruction, HloInstruction* fusion_instruction)
-    : name_(name),
+    : name_(NameUniquer::GetSanitizedName(name)),
       unique_id_(-1),
       root_instruction_(root_instruction),
       fusion_instruction_(fusion_instruction) {
@@ -234,7 +234,6 @@ Status HloComputation::RemoveInstruction(HloInstruction* instruction) {
   TF_RET_CHECK(instruction_iterators_.count(instruction) != 0);
   auto inst_it = instruction_iterators_.at(instruction);
   (*inst_it)->set_parent(nullptr);
-  instruction->DetachFromOperands();
   instructions_.erase(inst_it);
   return Status::OK();
 }
@@ -315,6 +314,42 @@ void ComputeComputationPostOrder(
   }
 }
 
+std::list<HloInstruction*> ComputeInstructionPostOrder(
+    HloInstruction* root, tensorflow::gtl::FlatSet<HloInstruction*>* visited) {
+  std::list<HloInstruction*> post_order;
+  std::vector<std::pair<HloInstruction*, bool>> dfs_stack;
+  dfs_stack.emplace_back(root, false);
+  while (!dfs_stack.empty()) {
+    const auto current = dfs_stack.back();
+    if (current.second) {
+      dfs_stack.pop_back();
+      if (!visited->insert(current.first).second) {
+        continue;
+      }
+      post_order.push_back(current.first);
+    } else {
+      if (visited->count(current.first)) {
+        dfs_stack.pop_back();
+        continue;
+      }
+      dfs_stack.back().second = true;
+
+      // Add the operands to the stack in reverse order so the first operand is
+      // processed first. This will produce a more natural ordering and a nicer
+      // result for thigns like HLO stringification.
+      const auto& operands = current.first->operands();
+      for (int64 i = operands.size() - 1; i >= 0; --i) {
+        dfs_stack.emplace_back(operands[i], false);
+      }
+
+      for (HloInstruction* op : current.first->control_predecessors()) {
+        dfs_stack.emplace_back(op, false);
+      }
+    }
+  }
+  return post_order;
+}
+
 }  // namespace
 
 std::list<HloInstruction*> HloComputation::MakeInstructionPostOrder() const {
@@ -328,9 +363,9 @@ std::list<HloInstruction*> HloComputation::MakeInstructionPostOrder() const {
       // users).
       trace_instructions.push_back(instruction.get());
     } else if (instruction->users().empty()) {
-      post_order.splice(post_order.end(),
-                        InstructionPostOrderer::GetOrder(instruction.get(),
-                                                         &added_instructions));
+      post_order.splice(
+          post_order.end(),
+          ComputeInstructionPostOrder(instruction.get(), &added_instructions));
     }
   }
   post_order.splice(post_order.end(), trace_instructions);
@@ -488,21 +523,7 @@ HloInstruction* HloComputation::CreateFusionInstruction(
 StatusOr<HloInstruction*> HloComputation::DeepCopyHelper(
     HloInstruction* instruction, const ShapeTree<bool>* indices_to_copy,
     ShapeTree<HloInstruction*>* copies_added, ShapeIndex* index) {
-  if (ShapeUtil::IsArray(instruction->shape())) {
-    if (indices_to_copy == nullptr || indices_to_copy->element(*index)) {
-      // Use kCopy to copy array elements
-      HloInstruction* copy = AddInstruction(HloInstruction::CreateUnary(
-          instruction->shape(), HloOpcode::kCopy, instruction));
-      if (copies_added != nullptr) {
-        *copies_added->mutable_element(*index) = copy;
-      }
-      return copy;
-    } else {
-      // Array elements which are not to be copied are passed through
-      // transparently.
-      return instruction;
-    }
-  } else if (ShapeUtil::IsTuple(instruction->shape())) {
+  if (ShapeUtil::IsTuple(instruction->shape())) {
     std::vector<HloInstruction*> elements;
     for (int64 i = 0; i < ShapeUtil::TupleElementCount(instruction->shape());
          i++) {
@@ -519,9 +540,27 @@ StatusOr<HloInstruction*> HloComputation::DeepCopyHelper(
       index->pop_back();
     }
     return AddInstruction(HloInstruction::CreateTuple(elements));
+  }
+  if (ShapeUtil::IsToken(instruction->shape())) {
+    // Tokens have no on-device representation and cannot be copied. Pass
+    // through transparently.
+    return instruction;
+  }
+
+  // Array shape.
+  TF_RET_CHECK(ShapeUtil::IsArray(instruction->shape()));
+  if (indices_to_copy == nullptr || indices_to_copy->element(*index)) {
+    // Use kCopy to copy array elements
+    HloInstruction* copy = AddInstruction(HloInstruction::CreateUnary(
+        instruction->shape(), HloOpcode::kCopy, instruction));
+    if (copies_added != nullptr) {
+      *copies_added->mutable_element(*index) = copy;
+    }
+    return copy;
   } else {
-    return FailedPrecondition(
-        "Can only copy array and tuple shaped instructions");
+    // Elements which are not to be copied are passed through
+    // transparently.
+    return instruction;
   }
 }
 
@@ -827,15 +866,6 @@ std::unique_ptr<HloComputation> HloComputation::CloneWithReplacements(
     }
   }
   context->MapComputation(this, result.get());
-  // We cloned the elements of 'replacements', so they're all going to be
-  // destroyed. HloInstructions need to be detached from their operands before
-  // they're destroyed, otherwise they stick around in the operands' users lists
-  // and cause use-after-frees.
-  for (auto& kv : replacements) {
-    if (std::unique_ptr<HloInstruction>& new_instr = kv.second) {
-      new_instr->DetachFromOperands();
-    }
-  }
   return result;
 }
 

@@ -136,6 +136,8 @@ enum class OperatorType {
   kReorderAxes,
   kSelect,
   kSparseToDense,
+  kTensorFlowEqual,
+  kTensorFlowNotEqual,
 };
 
 // Helper to deal with TensorFlow arrays using a different ordering of
@@ -153,6 +155,7 @@ enum class AxesOrder {
   k1HWO,     // Our standard for DepthwiseConv weights
   kHWIM,     // TensorFlow DepthwiseConv weights
   kNHWC,     // TensorFlow activations
+  kHWOI,     // TensorFlow back-prop conv weights
 };
 
 // The type of the scalars in an array.
@@ -1219,8 +1222,10 @@ struct TensorFlowSumOperator : Operator {
 };
 
 // TensorFlow Tile equivalent. Refer to TensorFlow documentation for details.
-// Not fully supported, just a placeholder to handle TensorFlow graphs and
-// support graph transformations to other operator types by matching sub-graphs.
+//
+// Inputs:
+//   inputs[0]: required: the input array
+//   inputs[1]: required: int array with length of rank(input[0])
 struct TensorFlowTileOperator : Operator {
   TensorFlowTileOperator() : Operator(OperatorType::kTensorFlowTile) {}
 };
@@ -1356,6 +1361,22 @@ struct TensorFlowGreaterOperator : Operator {
 struct TensorFlowGreaterEqualOperator : Operator {
   TensorFlowGreaterEqualOperator()
       : Operator(OperatorType::kTensorFlowGreaterEqual) {}
+};
+
+// TensorFlow Equal equivalent. Refer to TensorFlow documentation for
+// details.
+// Not fully supported, just a placeholder to handle TensorFlow graphs and
+// support graph transformations to other operator types by matching sub-graphs.
+// Typically, this is only used as an input to an Assert node, so can be
+// removed as an unused node as we drop Assert nodes.
+struct TensorFlowEqualOperator : Operator {
+  TensorFlowEqualOperator() : Operator(OperatorType::kTensorFlowEqual) {}
+};
+
+// TensorFlow Not Equal equivalent. Refer to TensorFlow documentation for
+// details.
+struct TensorFlowNotEqualOperator : Operator {
+  TensorFlowNotEqualOperator() : Operator(OperatorType::kTensorFlowNotEqual) {}
 };
 
 // Global max reduction: computes the max of all of entries in the input array.
@@ -1625,8 +1646,8 @@ struct SparseToDenseOperator : Operator {
 // be used for the transient array at hand. The 'start' and 'end' values are
 // offsets from the start of the workspace buffer, expressed in bytes.
 struct Alloc {
-  int start = 0;
-  int end = 0;
+  int64 start = 0;
+  int64 end = 0;
 };
 
 inline bool operator<(const Alloc& a, const Alloc& b) {

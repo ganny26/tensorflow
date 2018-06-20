@@ -349,6 +349,23 @@ class FunctionTest(test.TestCase):
 
     g(constant_op.constant(1.0))
 
+  def testNestedDefunWithNoOutputAndTapedInput(self):
+    three = resource_variable_ops.ResourceVariable(3.0, name='v')
+
+    @function.defun
+    def f(x):
+      # This function intentionally takes a taped variable as input,
+      # but does not return any values
+      math_ops.add(x, three)
+
+    @function.defun
+    def g(x):
+      tape.watch_variable(x)
+      y = math_ops.add(x, three)
+      f(y)
+
+    g(three)
+
   def testGradientTensorConversionWithDefun(self):
     three = resource_variable_ops.ResourceVariable(3.0, name='v')
 
@@ -615,6 +632,23 @@ class FunctionTest(test.TestCase):
     x = array_ops.ones([1, 2, 2, 1])
     y = model(x)
     self.assertAllEqual([[[[4.0]]]], y.numpy())
+
+  def testVariablesAreTracked(self):
+    v = resource_variable_ops.ResourceVariable(1.0)
+
+    def foo(x):
+      return v * x
+
+    defined = function.defun(foo)
+
+    x = constant_op.constant([1.0])
+    self.assertAllEqual(defined.variables, [])
+    _ = defined(x)
+    self.assertAllEqual(defined.variables, [v])
+
+    x = constant_op.constant([1.0, 2.0])
+    _ = defined(x)  # ensure the variables list remains the same
+    self.assertAllEqual(defined.variables, [v])
 
 
 @test_util.with_c_shapes

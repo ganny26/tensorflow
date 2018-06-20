@@ -36,7 +36,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_module_config.h"
 #include "tensorflow/compiler/xla/service/hlo_proto_util.h"
 #include "tensorflow/compiler/xla/service/platform_util.h"
-#include "tensorflow/compiler/xla/service/session.pb.h"
 #include "tensorflow/compiler/xla/service/source_map_util.h"
 #include "tensorflow/compiler/xla/service/transfer_manager.h"
 #include "tensorflow/compiler/xla/shape_layout.h"
@@ -61,33 +60,6 @@ using ::xla::source_map_util::InvalidParameterArgument;
 namespace xla {
 
 namespace {
-
-// Records the arguments used to invoke a computation in a SessionModule
-// proto.
-Status RecordArguments(
-    const tensorflow::gtl::ArraySlice<const ShapedBuffer*> arguments,
-    se::StreamExecutor* executor, TransferManager* transfer_manager,
-    SessionModule* module) {
-  module->clear_arguments();
-  for (const ShapedBuffer* argument : arguments) {
-    TF_ASSIGN_OR_RETURN(
-        std::unique_ptr<Literal> literal,
-        transfer_manager->TransferLiteralFromDevice(executor, *argument));
-    *module->add_arguments() = literal->ToProto();
-  }
-  return Status::OK();
-}
-
-// Records the result of a computation in a SessionModule proto.
-Status RecordResult(const ShapedBuffer& result, se::StreamExecutor* executor,
-                    TransferManager* transfer_manager, SessionModule* module) {
-  module->clear_result();
-  TF_ASSIGN_OR_RETURN(
-      std::unique_ptr<Literal> literal,
-      transfer_manager->TransferLiteralFromDevice(executor, result));
-  *module->mutable_result() = literal->ToProto();
-  return Status::OK();
-}
 
 // Records the arguments used to invoke a computation in an HloSnapshot proto.
 Status RecordArguments(
@@ -376,8 +348,8 @@ StatusOr<std::vector<std::unique_ptr<Executable>>> Service::BuildExecutables(
                  module_protos[i]->entry_computation_name().c_str());
       TF_RETURN_IF_ERROR(
           Executable::DumpToDirectory(directory_path, filename, *hlo_snapshot));
-      hlo_snapshots.push_back(std::move(hlo_snapshot));
     }
+    hlo_snapshots.push_back(std::move(hlo_snapshot));
   }
 
   VLOG(1) << "Computations:";
@@ -749,6 +721,15 @@ Status Service::ExecuteGraphParallel(const ExecuteGraphParallelRequest* arg,
     executable_ptrs.push_back(executable.get());
   }
 
+  for (int i = 0; i < executable_ptrs.size(); i++) {
+    if (executable_ptrs[i]->dumping_snapshot()) {
+      TF_RETURN_IF_ERROR(RecordArguments(all_arguments[i].front(),
+                                         all_executors[i][0],
+                                         execute_backend_->transfer_manager(),
+                                         executable_ptrs[i]->hlo_snapshot()));
+    }
+  }
+
   // Execute the generated executables in parallel and return the device
   // handles for each computation's output.
   ExecutionProfile profile;
@@ -762,6 +743,18 @@ Status Service::ExecuteGraphParallel(const ExecuteGraphParallelRequest* arg,
     *response.mutable_output() = output;
     *response.mutable_profile() = profile;
     *result->add_responses() = response;
+  }
+
+  for (int i = 0; i < executable_ptrs.size(); i++) {
+    if (executable_ptrs[i]->dumping_snapshot()) {
+      TF_ASSIGN_OR_RETURN(const ShapedBuffer* result_buffer,
+                          allocation_tracker_.ResolveForReplica(outputs[i], 0));
+      TF_RETURN_IF_ERROR(RecordResult(*result_buffer, all_executors[i][0],
+                                      execute_backend_->transfer_manager(),
+                                      executable_ptrs[i]->hlo_snapshot()));
+      // Dump out the ith snapshot.
+      TF_RETURN_IF_ERROR(executable_ptrs[i]->DumpHloSnapshot());
+    }
   }
 
   VLOG(1) << "successfully completed 'execute-graph-parallel' request";
@@ -862,6 +855,10 @@ StatusOr<std::unique_ptr<Executable>> Service::BuildExecutable(
   TF_ASSIGN_OR_RETURN(std::unique_ptr<Executable> executable,
                       backend->compiler()->RunBackend(
                           std::move(module), executor, device_allocator));
+
+  if (!execution_directory_path.empty()) {
+    executable->set_hlo_snapshot(std::move(hlo_snapshot));
+  }
 
   return std::move(executable);
 }
