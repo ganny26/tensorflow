@@ -30,6 +30,7 @@ limitations under the License.
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/stringpiece.h"
 #include "tensorflow/core/lib/strings/str_util.h"
+#include "tensorflow/core/util/status_util.h"
 
 namespace tensorflow {
 
@@ -631,9 +632,6 @@ class ColocationGraph {
   // Ensures that the devices of 'dst's resource and reference match the device
   // specified for 'src', which is an input of 'dst' with a partially or fully
   // specified device.
-  //
-  // TODO(akshayka): Consider adding a way to whitelist ops that want to be
-  // exempt from this check.
   Status VerifyResourceAndRefInputsCanBeColocated(
       const Node* dst, const Node* src,
       const DeviceNameUtils::ParsedName& src_parsed_name) {
@@ -683,6 +681,15 @@ bool IsGeneratorNode(const Node* node) {
          !IsRefType(node->output_type(0));
 }
 
+bool IsExemptFromResourceInputColocation(const Node* node) {
+  // Note: Partitioned function calls, which place and partition their
+  // function bodies, are exempt from this check: they forward resource and
+  // ref inputs to operations that are appropriately placed, instead of
+  // dereferencing them.
+  const string& op_type = node->op_def().name();
+  return op_type == "PartitionedCall" || op_type == "StatefulPartitionedCall";
+}
+
 }  // namespace
 
 Placer::Placer(Graph* graph, const DeviceSet* devices,
@@ -717,8 +724,8 @@ Status Placer::Run() {
   // 2. Enumerate the constraint edges, and use them to update the disjoint
   // node set.
 
-  // If `node` has an input edge with reference type, add an
-  // edge from the source of that edge to `node`.
+  // If `node` has an input edge with reference type, add an edge from the
+  // source of that edge to `node`.
   for (const Edge* edge : graph_->edges()) {
     if (edge->IsControlEdge()) {
       continue;
@@ -726,7 +733,10 @@ Status Placer::Run() {
     Node* src = edge->src();
     Node* dst = edge->dst();
     DataType input_type = dst->input_type(edge->dst_input());
-    if (input_type == DT_RESOURCE || IsRefType(input_type)) {
+    if ((input_type == DT_RESOURCE || IsRefType(input_type)) &&
+        !IsExemptFromResourceInputColocation(dst)) {
+      // Colocate `src` and `dst` to maintain the invariant that nodes connected
+      // by reference edges are colocated.
       int src_root_id = colocation_graph.FindRoot(src->id());
       int dst_root_id = colocation_graph.FindRoot(dst->id());
       auto& src_root = colocation_graph.members_[src_root_id];
@@ -813,10 +823,10 @@ Status Placer::Run() {
     std::vector<Device*>* devices;
     Status status = colocation_graph.GetDevicesForNode(node, &devices);
     if (!status.ok()) {
-      return AttachDef(
-          errors::InvalidArgument("Cannot assign a device for operation '",
-                                  node->name(), "': ", status.error_message()),
-          *node);
+      return AttachDef(errors::InvalidArgument(
+                           "Cannot assign a device for operation ",
+                           RichNodeName(node), ": ", status.error_message()),
+                       *node);
     }
 
     // Returns the first device in sorted devices list so we will always
@@ -860,10 +870,10 @@ Status Placer::Run() {
     std::vector<Device*>* devices;
     Status status = colocation_graph.GetDevicesForNode(node, &devices);
     if (!status.ok()) {
-      return AttachDef(
-          errors::InvalidArgument("Cannot assign a device for operation '",
-                                  node->name(), "': ", status.error_message()),
-          *node);
+      return AttachDef(errors::InvalidArgument(
+                           "Cannot assign a device for operation ",
+                           RichNodeName(node), ": ", status.error_message()),
+                       *node);
     }
 
     int assigned_device = -1;
@@ -926,6 +936,24 @@ void Placer::LogDeviceAssignment(const Node* node) const {
     LOG(INFO) << node->name() << ": "
               << "(" << node->type_string() << ")"
               << node->assigned_device_name();
+  }
+}
+
+bool Placer::ClientHandlesErrorFormatting() const {
+  return options_ != nullptr &&
+         options_->config.experimental().client_handles_error_formatting();
+}
+
+// Returns the node name in single quotes. If the client handles formatted
+// errors, appends a formatting tag which the client will reformat into, for
+// example, " (defined at filename:123)".
+string Placer::RichNodeName(const Node* node) const {
+  string quoted_name = strings::StrCat("'", node->name(), "'");
+  if (ClientHandlesErrorFormatting()) {
+    string file_and_line = error_format_tag(*node, "${file}:${line}");
+    return strings::StrCat(quoted_name, " (defined at ", file_and_line, ")");
+  } else {
+    return quoted_name;
   }
 }
 

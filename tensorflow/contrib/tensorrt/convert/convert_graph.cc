@@ -86,27 +86,48 @@ bool IsTensorRTCandidate(const tensorflow::Node* node) {
   // TODO(jie): Segmentation shouldn't associated with op name.
   //            Split it into a registration for each kernel.
   static const std::set<string> candidate_ops = {
-      "Identity",
-      "Snapshot",
-      "Const",
-      "Conv2D",
-      "MaxPool",
-      "BiasAdd",
-      "Relu",
-      "Add",
-      "Mul",
-      "Sub",
-      "Rsqrt",
-      "Pad",
-      "Mean",
-      "AvgPool",
-      "ConcatV2",
-      "DepthwiseConv2dNative",
-      "FusedBatchNorm",
-      "FusedBatchNormV2",
-      // TODO(ben,jie): ...
+    "Identity",
+    "Snapshot",
+    "Const",
+    "Conv2D",
+    "MaxPool",
+    "BiasAdd",
+    "Relu",
+    "Add",
+    "Mul",
+    "Sub",
+    "Rsqrt",
+    "Pad",
+    "Mean",
+    "AvgPool",
+    "ConcatV2",
+    "DepthwiseConv2dNative",
+    "FusedBatchNorm",
+    "FusedBatchNormV2",
+    "Div",
+    "RealDiv",
+    "Rsqrt",
+    "Reciprocal",
+    "Exp",
+    "Log",
+    "Sqrt",
+    "Abs",
+    "Neg",
+#if NV_TENSORRT_MAJOR > 3
+    "MatMul",
+    "BatchMatMul",
+    "Softmax",
+    "Minimum",
+    "Maximum",
+    "TopKV2",
+    "Sum",
+    "Prod",
+    "Max",
+    "Min",
+#endif
+    // TODO(ben,jie): ...
   };
-  // LINT.ThenChange(//tensorflow/contrib/tensorrt/convert/convert_nodes.h)
+  // LINT.ThenChange(//tensorflow/contrib/tensorrt/convert/convert_nodes.cc)
   return (candidate_ops.count(node->type_string()) ||
           PluginFactoryTensorRT::GetInstance()->IsPlugin(node->type_string()));
 }
@@ -168,7 +189,7 @@ tensorflow::Status ConvertCalibGraphToInferGraph(
             "Can't get TRTCalibrator from resource manager!");
       }
       cres->Unref();
-      calib_rm->Cleanup(container_name);
+      TF_RETURN_IF_ERROR(calib_rm->Cleanup(container_name));
     }
   }
   return tensorflow::Status::OK();
@@ -248,6 +269,7 @@ tensorflow::Status GetEngineInfo(
     const std::vector<tensorflow::Node*>& reverse_topo_order,
     EngineInfo* info) {
   std::vector<int> subgraph_node_ids;
+  std::set<int> added_const_node_ids;  // Used to prevent double insertion.
   std::set<string> segment_devices;
   int input_port = 0;
   int output_port = 0;
@@ -257,6 +279,7 @@ tensorflow::Status GetEngineInfo(
   // edge, thus there must not be any duplicates since source nodes of
   // input/output edges must be in different split of the graph.
   // TODO(aaroey): consider using node id and port instead.
+  // TODO(aaroey): using topo order instead of reverting reverse topo order.
   std::unordered_map<string, int> created_edges;
   for (auto it = reverse_topo_order.rbegin(); it != reverse_topo_order.rend();
        ++it) {
@@ -275,8 +298,7 @@ tensorflow::Status GetEngineInfo(
                 << " neither have requested device nor assigned device";
       }
     }
-    int node_id = node->id();
-    subgraph_node_ids.push_back(node_id);
+    const int node_id = node->id();
     for (const auto edge : node->in_edges()) {
       auto input_node = edge->src();
       if (segment_nodes.count(input_node->name()) == 0) {
@@ -286,7 +308,10 @@ tensorflow::Status GetEngineInfo(
         // won't be removed from the graph. If it doesn't have any edges, TF
         // will prune it out.
         if (input_node->type_string() == "Const") {
-          subgraph_node_ids.push_back(input_node->id());
+          if (added_const_node_ids.count(input_node->id()) == 0) {
+            added_const_node_ids.insert(input_node->id());
+            subgraph_node_ids.push_back(input_node->id());
+          }
         } else if (!edge->IsControlEdge() && !input_node->IsSource()) {
           string s(input_node->name());
           StrAppend(&s, ":", edge->src_output());
@@ -304,6 +329,9 @@ tensorflow::Status GetEngineInfo(
         }
       }
     }
+    // We need to add possible const input nodes before adding this node in
+    // order to keep the topological order.
+    subgraph_node_ids.push_back(node_id);
     for (const auto edge : node->out_edges()) {
       auto output_node = edge->dst();
       if (segment_nodes.count(output_node->name()) == 0 &&

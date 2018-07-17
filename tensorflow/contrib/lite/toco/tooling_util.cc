@@ -350,7 +350,7 @@ const char* OperatorTypeName(OperatorType type) {
     HANDLE_OPERATORTYPENAME_CASE(Less)
     HANDLE_OPERATORTYPENAME_CASE(LessEqual)
     HANDLE_OPERATORTYPENAME_CASE(MatMul)
-    HANDLE_OPERATORTYPENAME_CASE(Max)      //  Reduction Max
+    HANDLE_OPERATORTYPENAME_CASE(ReduceMax)  //  Reduction Max
     HANDLE_OPERATORTYPENAME_CASE(Maximum)  //  Element-wise Maximum
     HANDLE_OPERATORTYPENAME_CASE(Merge)
     HANDLE_OPERATORTYPENAME_CASE(Min)      //  Reduction Min
@@ -385,8 +385,10 @@ const char* OperatorTypeName(OperatorType type) {
     HANDLE_OPERATORTYPENAME_CASE(SpaceToBatchND)
     HANDLE_OPERATORTYPENAME_CASE(BatchToSpaceND)
     HANDLE_OPERATORTYPENAME_CASE(Mean)
+    HANDLE_OPERATORTYPENAME_CASE(ReduceProd)
     HANDLE_OPERATORTYPENAME_CASE(Svdf)
     HANDLE_OPERATORTYPENAME_CASE(ArgMax)
+    HANDLE_OPERATORTYPENAME_CASE(ArgMin)
     HANDLE_OPERATORTYPENAME_CASE(TopK_V2)
     HANDLE_OPERATORTYPENAME_CASE(Unsupported)
     HANDLE_OPERATORTYPENAME_CASE(Exp)
@@ -1265,8 +1267,13 @@ void InsertCopyOperator(Model* model, const string& source_array_name,
   auto* copy_op = new TensorFlowReshapeOperator;
   copy_op->inputs = {
       source_array_name,
-      CreateInt32Array(model, target_array_name + "_copy_shape", shape)};
+      CreateInt32Array(
+          model, AvailableArrayName(*model, target_array_name + "_copy_shape"),
+          shape)};
   copy_op->outputs = {target_array_name};
+  if (target_array.has_shape()) {
+    copy_op->shape = target_array.shape().dims();
+  }
   model->operators.emplace_back(copy_op);
 }
 
