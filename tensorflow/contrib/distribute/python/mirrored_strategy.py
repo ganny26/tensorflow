@@ -317,7 +317,7 @@ class MirroredStrategy(distribute_lib.DistributionStrategy):
     self._devices = [device_util.resolve(d) for d in devices]
     self._canonical_device_set = set(self._devices)
     self._device_index = values.PerDevice(
-        dict((d, i) for i, d in enumerate(devices)))
+        {d: i for i, d in enumerate(devices)})
     self._cross_tower_ops = cross_tower_ops
     self._prefetch_on_device = prefetch_on_device
     # TODO(yuefengz): consider setting the default device.
@@ -372,7 +372,10 @@ class MirroredStrategy(distribute_lib.DistributionStrategy):
     def body(i, *args):
       """A wrapper around `fn` to create the while loop body."""
       del args
-      fn_result = fn(ctx, iterator.get_next())
+      fn_inputs = iterator.get_next()
+      if not isinstance(fn_inputs, tuple):
+        fn_inputs = (fn_inputs,)
+      fn_result = fn(ctx, *fn_inputs)
       for (name, output) in ctx.last_step_outputs.items():
         # Convert all outputs to tensors, potentially from `DistributedValues`.
         ctx.last_step_outputs[name] = self.unwrap(output)

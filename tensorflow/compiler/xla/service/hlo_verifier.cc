@@ -156,11 +156,7 @@ Status CheckOperandAndParameter(const HloInstruction* instruction,
 
 Status ShapeVerifier::HandleInfeed(HloInstruction* instruction) {
   HloInfeedInstruction* infeed = Cast<HloInfeedInstruction>(instruction);
-  // Infeed has an optional single token operand.
-  // TODO(b/80000000): Update when token is not optional.
-  if (infeed->operand_count() == 1) {
-    TF_RETURN_IF_ERROR(CheckIsTokenOperand(instruction, 0));
-  }
+  TF_RETURN_IF_ERROR(CheckIsTokenOperand(instruction, 0));
 
   // The output of infeed is a tuple containing the data value and a token.
   return CheckShape(infeed,
@@ -170,11 +166,7 @@ Status ShapeVerifier::HandleInfeed(HloInstruction* instruction) {
 
 Status ShapeVerifier::HandleOutfeed(HloInstruction* instruction) {
   HloOutfeedInstruction* outfeed = Cast<HloOutfeedInstruction>(instruction);
-  // Outfeed has an optional token operand (operand 1).
-  // TODO(b/80000000): Update when token is not optional.
-  if (outfeed->operand_count() == 2) {
-    TF_RETURN_IF_ERROR(CheckIsTokenOperand(instruction, 1));
-  }
+  TF_RETURN_IF_ERROR(CheckIsTokenOperand(instruction, 1));
 
   // Outfeed has a separate shape field for the value which is outfed to the
   // host. The shape of the instruction itself is always a token.
@@ -194,7 +186,67 @@ Status ShapeVerifier::HandleHostCompute(HloInstruction*) {
   return Status::OK();
 }
 
-Status ShapeVerifier::HandleRng(HloInstruction*) { return Status::OK(); }
+bool ShapeVerifier::HasCompatibleElementTypes(const Shape& shape_0,
+                                              const Shape& shape_1,
+                                              const Shape& result_shape) {
+  return ShapeUtil::SameElementType(shape_0, shape_1) &&
+         (ShapeUtil::SameElementType(shape_0, result_shape) ||
+          (allow_mixed_precision_ &&
+           ShapeUtil::SameElementTypeIgnoringFpPrecision(shape_0,
+                                                         result_shape)));
+}
+
+Status ShapeVerifier::HandleRng(HloInstruction* instruction) {
+  if (instruction->operand_count() != 2) {
+    return InternalError("Expected two operands for Rng instruction: %s",
+                         instruction->ToString().c_str());
+  }
+
+  const Shape& shape_0 = instruction->operand(0)->shape();
+  const Shape& shape_1 = instruction->operand(1)->shape();
+  if (!ShapeUtil::IsScalar(shape_0) || !ShapeUtil::IsScalar(shape_1)) {
+    return InternalError(
+        "Expected scalar types for the two operands of Rng instruction: %s",
+        instruction->ToString().c_str());
+  }
+
+  if (!HasCompatibleElementTypes(shape_0, shape_1, instruction->shape())) {
+    return InternalError(
+        "Expected compatible element types for the result and the two operands"
+        " of Rng instruction: %s",
+        instruction->ToString().c_str());
+  }
+
+  PrimitiveType element_type = shape_0.element_type();
+  switch (instruction->random_distribution()) {
+    case RNG_UNIFORM:
+      if (!primitive_util::IsFloatingPointType(element_type) &&
+          !primitive_util::IsIntegralType(element_type) &&
+          element_type != PRED) {
+        return InternalError(
+            "Element type not supported."
+            " Expected element to be of floating point type, integral type or"
+            " predicate type for RngUniform: %s",
+            instruction->ToString().c_str());
+      }
+      break;
+
+    case RNG_NORMAL:
+      if (!primitive_util::IsFloatingPointType(element_type)) {
+        return InternalError(
+            "Element type not supported."
+            " Expected element to be FloatingPointType for RngNormal: %s",
+            instruction->ToString().c_str());
+      }
+      break;
+    default:
+      return InternalError(
+          "Invalid Rng distribution %s",
+          RandomDistribution_Name(instruction->random_distribution()).c_str());
+  }
+
+  return Status::OK();
+}
 
 Status ShapeVerifier::HandleReverse(HloInstruction* reverse) {
   return CheckShape(
@@ -463,9 +515,9 @@ namespace {
 // inputs.
 Status CheckMixedPrecisionOperands(const HloInstruction* instruction) {
   switch (instruction->opcode()) {
-    // White list the following opcodes for mixed-precision check, because they
-    // involve data pass through or grouping via tuples, where the precisions
-    // of buffers can be different.
+    // White list the following opcodes for mixed-precision check, because
+    // they involve data pass through or grouping via tuples, where the
+    // precisions of buffers can be different.
     case HloOpcode::kCall:
     case HloOpcode::kConditional:
     case HloOpcode::kConstant:
@@ -647,7 +699,8 @@ string ComputationsToString(
 
 // Verifies various invariants about the structure of the HLO:
 //
-// (1) each instruction has a non-null parent() set to the HloComputation which
+// (1) each instruction has a non-null parent() set to the HloComputation
+// which
 //     contains it.
 //
 // (2) each computation has a non-null parent() set to the HloModule which
@@ -681,9 +734,9 @@ Status VerifyHloStructure(HloModule* module) {
   }
 
   // Check that operands are in the same computation separately from verifying
-  // parent() correctness so conditions like a null HloInstruction::parent() are
-  // identified and reported explicitly above rather than reporting a mismatched
-  // operand.
+  // parent() correctness so conditions like a null HloInstruction::parent()
+  // are identified and reported explicitly above rather than reporting a
+  // mismatched operand.
   for (const HloComputation* computation : module->computations()) {
     for (const HloInstruction* instruction : computation->instructions()) {
       for (int i = 0; i < instruction->operand_count(); ++i) {
@@ -707,13 +760,14 @@ Status HloVerifier::CheckFusionInstruction(HloInstruction* fusion) const {
   HloComputation* fused_computation = fusion->fused_instructions_computation();
   if (fusion != fused_computation->FusionInstruction()) {
     return InternalError(
-        "Instruction of fused computation does not match expected instruction "
+        "Instruction of fused computation does not match expected "
+        "instruction "
         "%s.",
         fusion->ToString().c_str());
   }
 
-  // Fused root instruction and fused parameters must all be owned by the fusion
-  // computation.
+  // Fused root instruction and fused parameters must all be owned by the
+  // fusion computation.
   bool root_owned = false;
   const std::vector<HloInstruction*>& fused_parameters =
       fusion->fused_parameters();
@@ -755,8 +809,8 @@ Status HloVerifier::CheckFusionInstruction(HloInstruction* fusion) const {
                          fusion->ToString().c_str());
   }
 
-  // All uses of fused instructions must be in the fusion computation, and every
-  // non-root instruction must have at least one use.
+  // All uses of fused instructions must be in the fusion computation, and
+  // every non-root instruction must have at least one use.
   for (auto* instruction :
        fusion->fused_instructions_computation()->instructions()) {
     if (instruction != fused_root) {
@@ -800,7 +854,8 @@ Status HloVerifier::CheckFusionInstruction(HloInstruction* fusion) const {
     if (!ShapeUtil::Compatible(fused_param->shape(),
                                fusion->operand(param_no)->shape())) {
       return InternalError(
-          "Shape mismatch between parameter number %lld and its operand in %s.",
+          "Shape mismatch between parameter number %lld and its operand in "
+          "%s.",
           param_no, fusion->ToString().c_str());
     }
   }
@@ -918,8 +973,9 @@ Status CheckSameChannel(const HloInstruction* instr1,
   return Status::OK();
 }
 
-// Checks if the given two instructions have the same is_host_transfer attribute
-// value. Intsructions must be send/recv instructions or their 'done' variant.
+// Checks if the given two instructions have the same is_host_transfer
+// attribute value. Intsructions must be send/recv instructions or their
+// 'done' variant.
 Status CheckSameIsHostTransfer(const HloInstruction* instr1,
                                const HloInstruction* instr2) {
   const HloSendRecvInstruction* send_recv1 =
@@ -930,7 +986,8 @@ Status CheckSameIsHostTransfer(const HloInstruction* instr1,
   TF_RET_CHECK(send_recv2 != nullptr);
   if (send_recv1->is_host_transfer() != send_recv2->is_host_transfer()) {
     return InternalError(
-        "Expected instructions to have the same is-host-transfer property: %s, "
+        "Expected instructions to have the same is-host-transfer property: "
+        "%s, "
         "%s ",
         instr1->ToString().c_str(), instr2->ToString().c_str());
   }
@@ -949,7 +1006,8 @@ Status VerifySendsAndRecvs(const HloModule& module) {
           host_channels.insert({sendrecv->channel_id(), sendrecv});
       if (!it_inserted.second) {
         return FailedPrecondition(
-            "Channel %lld is used for multiple host send/recv instructions: %s "
+            "Channel %lld is used for multiple host send/recv instructions: "
+            "%s "
             "and "
             "%s",
             sendrecv->channel_id(), sendrecv->ToString().c_str(),

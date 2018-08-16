@@ -1705,6 +1705,10 @@ Status AlgebraicSimplifierVisitor::HandleReshape(HloInstruction* reshape) {
         reshape, HloInstruction::CreateReshape(reshape->shape(),
                                                operand->mutable_operand(0)));
   }
+  if (operand->opcode() == HloOpcode::kRng && operand->user_count() == 1) {
+    *operand->mutable_shape() = reshape->shape();
+    return ReplaceInstruction(reshape, operand);
+  }
 
   if (HloOpcode::kBroadcast == reshape->operand(0)->opcode()) {
     auto opt_dims = ReshapeLeavesDimensionsUnmodified(
@@ -1803,6 +1807,12 @@ Status AlgebraicSimplifierVisitor::HandleDynamicUpdateSlice(
 }
 
 Status AlgebraicSimplifierVisitor::HandleReduce(HloInstruction* reduce) {
+  // TODO(b/112040122): Most of those optimizations can be done for multi-output
+  // reduces.
+  if (ShapeUtil::IsTuple(reduce->shape())) {
+    return Status::OK();
+  }
+
   auto arg = reduce->mutable_operand(0);
   auto init_value = reduce->mutable_operand(1);
   tensorflow::gtl::ArraySlice<int64> dimensions(reduce->dimensions());
@@ -2136,6 +2146,11 @@ Status AlgebraicSimplifierVisitor::HandleTranspose(HloInstruction* transpose) {
                        transpose->shape(), operand->mutable_operand(0),
                        ComposePermutations(operand->dimensions(),
                                            transpose->dimensions())));
+  }
+
+  if (operand->opcode() == HloOpcode::kRng && operand->user_count() == 1) {
+    *operand->mutable_shape() = transpose->shape();
+    return ReplaceInstruction(transpose, operand);
   }
 
   if (is_layout_sensitive_ && TransposeIsBitcast(transpose)) {

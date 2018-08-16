@@ -60,12 +60,17 @@ def get_tpu_system_metadata(tpu_cluster_resolver):
 class TPUStrategy(one_device_strategy.OneDeviceStrategy):
   """Experimental TPU distribution strategy implementation."""
 
-  def __init__(self, tpu_cluster_resolver):
+  def __init__(self, tpu_cluster_resolver, steps_per_run):
     """Initializes the TPUStrategy object.
 
     Args:
       tpu_cluster_resolver: A tf.contrib.cluster_resolver.TPUClusterResolver,
           which provides information about the TPU cluster.
+      steps_per_run: Number of steps to run on device before returning to the
+          host. Note that this can have side-effects on performance, hooks,
+          metrics, summaries etc.
+          This parameter is only used when Distribution Strategy is used with
+          estimator or keras.
     """
     # TODO(isaprykin): Generalize the defaults.  They are currently tailored for
     # the unit test.
@@ -76,6 +81,9 @@ class TPUStrategy(one_device_strategy.OneDeviceStrategy):
 
     # TODO(priyag): This should not be hardcoded here.
     self._host = '/device:CPU:0'
+    # TODO(sourabhbajaj): Remove this once performance of running one step
+    # at a time is comparable to multiple steps.
+    self.steps_per_run = steps_per_run
 
   def distribute_dataset(self, dataset_fn):
     # TODO(priyag): Perhaps distribute across cores here.
@@ -136,7 +144,10 @@ class TPUStrategy(one_device_strategy.OneDeviceStrategy):
     ctx = values.MultiStepContext()
     def run_fn(*args, **kwargs):
       del args, kwargs
-      fn_result = fn(ctx, dequeue_fn())
+      fn_inputs = dequeue_fn()
+      if not isinstance(fn_inputs, tuple):
+        fn_inputs = (fn_inputs,)
+      fn_result = fn(ctx, *fn_inputs)
       flat_last_step_outputs = nest.flatten(ctx.last_step_outputs)
       if flat_last_step_outputs:
         with ops.control_dependencies([fn_result]):
