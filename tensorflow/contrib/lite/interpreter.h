@@ -136,6 +136,11 @@ class Interpreter {
   // interpreter.
   TfLiteStatus SetVariables(std::vector<int> variables);
 
+  // Ensure the internal node storage memory allocates at least `count`
+  // spots for node. NOTE, this doesn't actually add operators. This is an
+  // efficiency optimization that is subject to change.
+  void ReserveNodes(int count);
+
   // Adds a node with the given parameters and returns the index of the new
   // node in `node_index` (optionally). Interpreter will take ownership of
   // `builtin_data` and destroy it with `free`. Ownership of 'init_data'
@@ -413,6 +418,10 @@ class Interpreter {
     return op_reg.profiling_string(&context_, node);
   }
 
+  // Set the value of an external context.
+  void SetExternalContext(TfLiteExternalContextType type,
+                          TfLiteExternalContext* ctx);
+
  private:
   friend class InterpreterBuilder;
   friend class InterpreterTest;
@@ -544,8 +553,6 @@ class Interpreter {
       struct TfLiteContext* context, TfLiteExternalContextType type);
 
   // Set the value of an external context.
-  void SetExternalContext(TfLiteExternalContextType type,
-                          TfLiteExternalContext* ctx);
   static void SetExternalContext(struct TfLiteContext* context,
                                  TfLiteExternalContextType type,
                                  TfLiteExternalContext* ctx);

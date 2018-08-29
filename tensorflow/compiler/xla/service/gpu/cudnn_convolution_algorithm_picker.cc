@@ -14,24 +14,25 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/compiler/xla/service/gpu/cudnn_convolution_algorithm_picker.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
+#include "absl/types/optional.h"
 #include "tensorflow/compiler/xla/literal_util.h"
 #include "tensorflow/compiler/xla/service/gpu/backend_configs.pb.h"
 #include "tensorflow/compiler/xla/service/gpu/buffer_comparator.h"
 #include "tensorflow/compiler/xla/service/gpu/convolution_thunk.h"
 #include "tensorflow/compiler/xla/service/gpu/ir_emission_utils.h"
-#include "tensorflow/core/lib/gtl/optional.h"
 #include "tensorflow/core/lib/strings/numbers.h"
-#include "tensorflow/core/lib/strings/strcat.h"
 #include "tensorflow/core/platform/mutex.h"
 
 namespace xla {
 namespace gpu {
 namespace {
 
+using absl::optional;
 using se::DeviceMemoryBase;
 using se::dnn::AlgorithmConfig;
 using se::dnn::AlgorithmDesc;
-using tensorflow::gtl::optional;
 
 class ScratchAllocator : public se::ScratchAllocator {
  public:
@@ -59,8 +60,8 @@ StatusOr<se::DeviceMemory<uint8>> ScratchAllocator::AllocateBytes(
   if (byte_size > GetMemoryLimitInBytes(stream)) {
     return se::port::Status(
         se::port::error::RESOURCE_EXHAUSTED,
-        tensorflow::strings::Printf(
-            "Allocating %lld bytes exceeds the memory limit of %lld bytes.",
+        absl::StrFormat(
+            "Allocating %d bytes exceeds the memory limit of %d bytes.",
             byte_size, GetMemoryLimitInBytes(stream)));
   }
 
@@ -128,14 +129,14 @@ std::vector<AlgorithmDesc> GetAlgorithms(CudnnConvKind kind,
 
 string AlgorithmToString(const AlgorithmDesc& algo) {
   if (algo.tensor_ops_enabled()) {
-    return tensorflow::strings::StrCat(algo.algo_id(), "+TC");
+    return absl::StrCat(algo.algo_id(), "+TC");
   }
-  return tensorflow::strings::StrCat(algo.algo_id());
+  return absl::StrCat(algo.algo_id());
 }
 
 string NumBytesToString(int64 bytes) {
-  return tensorflow::strings::StrCat(
-      tensorflow::strings::HumanReadableNumBytes(bytes), " (", bytes, "B)");
+  return absl::StrCat(tensorflow::strings::HumanReadableNumBytes(bytes), " (",
+                      bytes, "B)");
 }
 
 // Acquires a process-global lock on the device pointed to by the given
@@ -296,6 +297,11 @@ CudnnConvolutionAlgorithmPicker::PickBestAlgorithm(
             .ok();
 
     if (launch_ok && profile_result.is_valid()) {
+      const bool crash_on_checking_failure =
+          instr->GetModule()
+              ->config()
+              .debug_options()
+              .xla_gpu_crash_on_verification_failures();
       if (comparator.has_value()) {
         StatusOr<bool> result = comparator->CompareEqual(
             se::DeviceMemory<Eigen::half>(*result_buf));
@@ -304,6 +310,7 @@ CudnnConvolutionAlgorithmPicker::PickBestAlgorithm(
                      << AlgorithmToString(*first_algorithm) << " against "
                      << AlgorithmToString(alg) << " for " << instr->ToString()
                      << ": " << result.status();
+          CHECK(!crash_on_checking_failure);
         } else if (!result.ValueOrDie()) {
           LOG(ERROR) << "Results mismatch between different convolution "
                         "algorithms. This is likely a bug in convolution, or "
@@ -311,6 +318,7 @@ CudnnConvolutionAlgorithmPicker::PickBestAlgorithm(
                      << instr->ToString() << " for "
                      << AlgorithmToString(*first_algorithm) << " vs "
                      << AlgorithmToString(alg);
+          CHECK(!crash_on_checking_failure);
         }
       } else if (cross_check_enabled) {
         auto comp = F16BufferComparator::Create(
@@ -322,6 +330,7 @@ CudnnConvolutionAlgorithmPicker::PickBestAlgorithm(
         } else {
           LOG(ERROR) << "Fail to initialize buffer comparator: "
                      << comp.status() << ", instruction: " << instr->ToString();
+          CHECK(!crash_on_checking_failure);
         }
       }
       int64 scratch_bytes_used = scratch_allocator.TotalAllocatedBytes();
@@ -353,7 +362,7 @@ CudnnConvolutionAlgorithmPicker::PickBestAlgorithm(
   return InternalError(
       "All algorithms tried for convolution %s failed.  Falling back to "
       "default algorithm.",
-      instr->ToString().c_str());
+      instr->ToString());
 }
 
 StatusOr<bool> CudnnConvolutionAlgorithmPicker::RunOnInstruction(

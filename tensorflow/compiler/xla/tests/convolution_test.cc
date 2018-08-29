@@ -18,6 +18,8 @@ limitations under the License.
 
 #include <memory>
 
+#include "absl/memory/memory.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/xla/array2d.h"
 #include "tensorflow/compiler/xla/array4d.h"
 #include "tensorflow/compiler/xla/client/global_data.h"
@@ -26,7 +28,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/client/xla_builder.h"
 #include "tensorflow/compiler/xla/layout_util.h"
 #include "tensorflow/compiler/xla/literal.h"
-#include "tensorflow/compiler/xla/ptr_util.h"
 #include "tensorflow/compiler/xla/reference_util.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/statusor.h"
@@ -35,8 +36,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/tests/literal_test_util.h"
 #include "tensorflow/compiler/xla/tests/test_macros.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/core/lib/strings/str_util.h"
-#include "tensorflow/core/lib/strings/strcat.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/platform/types.h"
 
@@ -71,16 +70,16 @@ class ForwardPassConvolution_3x3x256_256_OutputZ_Iota : public ConvolutionTest {
     const int kKernelSizeY = 2;
     const int kOutputActivationSizeZ = 256;
     const int kMiniBatchSize = 4;
-    auto alhs =
-        MakeUnique<Array4D<T>>(kMiniBatchSize, kInputActivationSizeZ,
-                               kInputActivationSizeY, kInputActivationSizeX);
+    auto alhs = absl::make_unique<Array4D<T>>(
+        kMiniBatchSize, kInputActivationSizeZ, kInputActivationSizeY,
+        kInputActivationSizeX);
     alhs->FillWithMultiples(static_cast<T>(1.0f));
     ASSERT_EQ(3, alhs->width());
     ASSERT_EQ(3, alhs->height());
 
-    auto arhs =
-        MakeUnique<Array4D<T>>(kOutputActivationSizeZ, kInputActivationSizeZ,
-                               kKernelSizeY, kKernelSizeX);
+    auto arhs = absl::make_unique<Array4D<T>>(kOutputActivationSizeZ,
+                                              kInputActivationSizeZ,
+                                              kKernelSizeY, kKernelSizeX);
     Array2D<T> rhs_raster({
         {1.0f, 0.0f},  // row 0
         {0.0f, 0.0f},  // row 1
@@ -466,7 +465,7 @@ void iota_int_init_value(std::vector<T>& values, int init_value) {
 }
 
 template <typename T>
-class Convolve2D_1x3x3x5_3x3x5x5_Valid : public ConvolutionTest {
+class Convolve2D_1x3x3x5_3x3x5x3_Valid : public ConvolutionTest {
  public:
   void RunTest() {
     XlaBuilder builder(TestName());
@@ -521,8 +520,139 @@ class Convolve2D_1x3x3x5_3x3x5x5_Valid : public ConvolutionTest {
   }
 };
 
-TYPED_TEST_CASE(Convolve2D_1x3x3x5_3x3x5x5_Valid, TestTypes);
-TYPED_TEST(Convolve2D_1x3x3x5_3x3x5x5_Valid, Types) { this->RunTest(); }
+TYPED_TEST_CASE(Convolve2D_1x3x3x5_3x3x5x3_Valid, TestTypes);
+TYPED_TEST(Convolve2D_1x3x3x5_3x3x5x3_Valid, Types) { this->RunTest(); }
+
+template <typename T>
+class Convolve2D_1x3x3x5_3x3x1x15_Depthwise_Valid : public ConvolutionTest {
+ public:
+  void RunTest() {
+    XlaBuilder builder(TestName());
+    std::vector<int64> input_dims = {1, 3, 3, 5};
+    std::vector<int64> filter_dims = {3, 3, 1, 15};
+    Shape input_shape = ShapeUtil::MakeShapeWithType<T>(input_dims);
+    Shape filter_shape = ShapeUtil::MakeShapeWithType<T>(filter_dims);
+    {
+      auto input = Parameter(&builder, 0, input_shape, "input");
+      auto filter = Parameter(&builder, 1, filter_shape, "filter");
+
+      // Tensorflow dimension numbers for 2D convolution.
+      ConvolutionDimensionNumbers dnums;
+      dnums.set_input_batch_dimension(0);
+      dnums.set_output_batch_dimension(0);
+      dnums.add_input_spatial_dimensions(1);
+      dnums.add_output_spatial_dimensions(1);
+      dnums.add_input_spatial_dimensions(2);
+      dnums.add_output_spatial_dimensions(2);
+      dnums.set_input_feature_dimension(3);
+      dnums.set_output_feature_dimension(3);
+      dnums.add_kernel_spatial_dimensions(0);
+      dnums.add_kernel_spatial_dimensions(1);
+      dnums.set_kernel_input_feature_dimension(2);
+      dnums.set_kernel_output_feature_dimension(3);
+
+      ConvWithGeneralDimensions(input, filter, {1, 1}, Padding::kValid, dnums,
+                                /*feature_group_count=*/5);
+    }
+
+    std::vector<T> input_elems(ShapeUtil::ElementsIn(input_shape));
+    iota_int_init_value(input_elems, 1);
+    auto input_r1 = LiteralUtil::CreateR1<T>(input_elems);
+    auto input_r4 = input_r1->Reshape(input_dims).ConsumeValueOrDie();
+
+    std::vector<T> filter_elems(ShapeUtil::ElementsIn(filter_shape));
+    iota_int_init_value(filter_elems, 1);
+    auto filter_r1 = LiteralUtil::CreateR1<T>(filter_elems);
+    auto filter_r4 = filter_r1->Reshape(filter_dims).ConsumeValueOrDie();
+
+    auto expected_r1 = LiteralUtil::CreateR1<T>(
+        {static_cast<T>(16029), static_cast<T>(16218), static_cast<T>(16407),
+         static_cast<T>(17172), static_cast<T>(17370), static_cast<T>(17568),
+         static_cast<T>(18369), static_cast<T>(18576), static_cast<T>(18783),
+         static_cast<T>(19620), static_cast<T>(19836), static_cast<T>(20052),
+         static_cast<T>(20925), static_cast<T>(21150), static_cast<T>(21375)});
+    auto expected_r4 = expected_r1->Reshape({1, 1, 1, 15}).ConsumeValueOrDie();
+
+    auto input_literal =
+        client_->TransferToServer(*input_r4).ConsumeValueOrDie();
+    auto filter_literal =
+        client_->TransferToServer(*filter_r4).ConsumeValueOrDie();
+
+    ComputeAndCompareLiteral(&builder, *expected_r4,
+                             {input_literal.get(), filter_literal.get()},
+                             error_spec_);
+  }
+};
+
+TYPED_TEST_CASE(Convolve2D_1x3x3x5_3x3x1x15_Depthwise_Valid, TestTypes);
+TYPED_TEST(Convolve2D_1x3x3x5_3x3x1x15_Depthwise_Valid, Types) {
+  this->RunTest();
+}
+
+template <typename T>
+class Convolve2D_1x2x2x6_2x2x1x12_Grouped_Valid : public ConvolutionTest {
+ public:
+  void RunTest() {
+    XlaBuilder builder(TestName());
+    std::vector<int64> input_dims = {1, 2, 2, 6};
+    std::vector<int64> filter_dims = {2, 2, 2, 12};
+    Shape input_shape = ShapeUtil::MakeShapeWithType<T>(input_dims);
+    Shape filter_shape = ShapeUtil::MakeShapeWithType<T>(filter_dims);
+    {
+      auto input = Parameter(&builder, 0, input_shape, "input");
+      auto filter = Parameter(&builder, 1, filter_shape, "filter");
+
+      // Tensorflow dimension numbers for 2D convolution.
+      ConvolutionDimensionNumbers dnums;
+      dnums.set_input_batch_dimension(0);
+      dnums.set_output_batch_dimension(0);
+      dnums.add_input_spatial_dimensions(1);
+      dnums.add_output_spatial_dimensions(1);
+      dnums.add_input_spatial_dimensions(2);
+      dnums.add_output_spatial_dimensions(2);
+      dnums.set_input_feature_dimension(3);
+      dnums.set_output_feature_dimension(3);
+      dnums.add_kernel_spatial_dimensions(0);
+      dnums.add_kernel_spatial_dimensions(1);
+      dnums.set_kernel_input_feature_dimension(2);
+      dnums.set_kernel_output_feature_dimension(3);
+
+      ConvWithGeneralDimensions(input, filter, {1, 1}, Padding::kValid, dnums,
+                                /*feature_group_count=*/3);
+    }
+
+    std::vector<T> input_elems(ShapeUtil::ElementsIn(input_shape));
+    iota_int_init_value(input_elems, 1);
+    auto input_r1 = LiteralUtil::CreateR1<T>(input_elems);
+    auto input_r4 = input_r1->Reshape(input_dims).ConsumeValueOrDie();
+
+    std::vector<T> filter_elems(ShapeUtil::ElementsIn(filter_shape));
+    iota_int_init_value(filter_elems, 1);
+    auto filter_r1 = LiteralUtil::CreateR1<T>(filter_elems);
+    auto filter_r4 = filter_r1->Reshape(filter_dims).ConsumeValueOrDie();
+
+    auto expected_r1 = LiteralUtil::CreateR1<T>(
+        {static_cast<T>(5076), static_cast<T>(5160), static_cast<T>(5244),
+         static_cast<T>(5328), static_cast<T>(6164), static_cast<T>(6264),
+         static_cast<T>(6364), static_cast<T>(6464), static_cast<T>(7380),
+         static_cast<T>(7496), static_cast<T>(7612), static_cast<T>(7728)});
+    auto expected_r4 = expected_r1->Reshape({1, 1, 1, 12}).ConsumeValueOrDie();
+
+    auto input_literal =
+        client_->TransferToServer(*input_r4).ConsumeValueOrDie();
+    auto filter_literal =
+        client_->TransferToServer(*filter_r4).ConsumeValueOrDie();
+
+    ComputeAndCompareLiteral(&builder, *expected_r4,
+                             {input_literal.get(), filter_literal.get()},
+                             error_spec_);
+  }
+};
+
+TYPED_TEST_CASE(Convolve2D_1x2x2x6_2x2x1x12_Grouped_Valid, TestTypes);
+TYPED_TEST(Convolve2D_1x2x2x6_2x2x1x12_Grouped_Valid, Types) {
+  this->RunTest();
+}
 
 // Test fixture to run convolution tests with and without convolution
 // canonicalization enabled.
