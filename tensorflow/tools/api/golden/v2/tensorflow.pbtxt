@@ -61,10 +61,6 @@ tf_module {
     mtype: "<type \'type\'>"
   }
   member {
-    name: "FixedLengthRecordReader"
-    mtype: "<type \'type\'>"
-  }
-  member {
     name: "GIT_VERSION"
     mtype: "<type \'str\'>"
   }
@@ -109,19 +105,11 @@ tf_module {
     mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
   }
   member {
-    name: "IdentityReader"
-    mtype: "<type \'type\'>"
-  }
-  member {
     name: "IndexedSlices"
     mtype: "<type \'type\'>"
   }
   member {
     name: "InteractiveSession"
-    mtype: "<type \'type\'>"
-  }
-  member {
-    name: "LMDBReader"
     mtype: "<type \'type\'>"
   }
   member {
@@ -177,10 +165,6 @@ tf_module {
     mtype: "<type \'type\'>"
   }
   member {
-    name: "ReaderBase"
-    mtype: "<type \'type\'>"
-  }
-  member {
     name: "RegisterGradient"
     mtype: "<type \'type\'>"
   }
@@ -225,10 +209,6 @@ tf_module {
     mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
   }
   member {
-    name: "TFRecordReader"
-    mtype: "<type \'type\'>"
-  }
-  member {
     name: "Tensor"
     mtype: "<type \'type\'>"
   }
@@ -242,10 +222,6 @@ tf_module {
   }
   member {
     name: "TensorShape"
-    mtype: "<type \'type\'>"
-  }
-  member {
-    name: "TextLineReader"
     mtype: "<type \'type\'>"
   }
   member {
@@ -271,10 +247,6 @@ tf_module {
   member {
     name: "VariableSynchronization"
     mtype: "<class \'enum.EnumMeta\'>"
-  }
-  member {
-    name: "WholeFileReader"
-    mtype: "<type \'type\'>"
   }
   member {
     name: "app"
@@ -363,6 +335,14 @@ tf_module {
   member {
     name: "gfile"
     mtype: "<type \'module\'>"
+  }
+  member {
+    name: "glorot_normal_initializer"
+    mtype: "<type \'type\'>"
+  }
+  member {
+    name: "glorot_uniform_initializer"
+    mtype: "<type \'type\'>"
   }
   member {
     name: "graph_util"
@@ -599,10 +579,6 @@ tf_module {
   member_method {
     name: "NotDifferentiable"
     argspec: "args=[\'op_type\'], varargs=None, keywords=None, defaults=None"
-  }
-  member_method {
-    name: "Print"
-    argspec: "args=[\'input_\', \'data\', \'message\', \'first_n\', \'summarize\', \'name\'], varargs=None, keywords=None, defaults=[\'None\', \'None\', \'None\', \'None\'], "
   }
   member_method {
     name: "abs"
@@ -1193,14 +1169,6 @@ tf_module {
     argspec: "args=[], varargs=None, keywords=None, defaults=None"
   }
   member_method {
-    name: "glorot_normal_initializer"
-    argspec: "args=[\'seed\', \'dtype\'], varargs=None, keywords=None, defaults=[\'None\', \"<dtype: \'float32\'>\"], "
-  }
-  member_method {
-    name: "glorot_uniform_initializer"
-    argspec: "args=[\'seed\', \'dtype\'], varargs=None, keywords=None, defaults=[\'None\', \"<dtype: \'float32\'>\"], "
-  }
-  member_method {
     name: "gradients"
     argspec: "args=[\'ys\', \'xs\', \'grad_ys\', \'name\', \'colocate_gradients_with_ops\', \'gate_gradients\', \'aggregation_method\', \'stop_gradients\'], varargs=None, keywords=None, defaults=[\'None\', \'gradients\', \'False\', \'False\', \'None\', \'None\'], "
   }
@@ -1347,6 +1315,10 @@ tf_module {
   member_method {
     name: "load_file_system_library"
     argspec: "args=[\'library_filename\'], varargs=None, keywords=None, defaults=None"
+  }
+  member_method {
+    name: "load_library"
+    argspec: "args=[\'library_location\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
     name: "load_op_library"
@@ -1565,6 +1537,10 @@ tf_module {
     argspec: "args=[\'x\', \'y\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
   member_method {
+    name: "print"
+    argspec: "args=[], varargs=inputs, keywords=kwargs, defaults=None"
+  }
+  member_method {
     name: "py_func"
     argspec: "args=[\'func\', \'inp\', \'Tout\', \'stateful\', \'name\'], varargs=None, keywords=None, defaults=[\'True\', \'None\'], "
   }
@@ -1747,6 +1723,10 @@ tf_module {
   member_method {
     name: "scatter_nd"
     argspec: "args=[\'indices\', \'updates\', \'shape\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+  }
+  member_method {
+    name: "searchsorted"
+    argspec: "args=[\'sorted_sequence\', \'values\', \'side\', \'out_type\', \'name\'], varargs=None, keywords=None, defaults=[\'left\', \"<dtype: \'int32\'>\", \'None\'], "
   }
   member_method {
     name: "segment_max"

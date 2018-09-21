@@ -65,6 +65,17 @@ class XlaAssignVariableOp : public AsyncOpKernel {
                               .HostMemory("resources"),   \
                           KERNEL);
 
+#define REGISTER_XLA_COMPILE_KERNEL(DEVICE, KERNEL, TYPES) \
+  REGISTER_KERNEL_BUILDER(Name("_XlaCompile")              \
+                              .Device(DEVICE)              \
+                              .HostMemory("constants")     \
+                              .HostMemory("resources"),    \
+                          KERNEL);
+
+#define REGISTER_XLA_RUN_KERNEL(DEVICE, KERNEL, TYPES) \
+  REGISTER_KERNEL_BUILDER(                             \
+      Name("_XlaRun").Device(DEVICE).HostMemory("constants"), KERNEL);
+
 #define REGISTER_XLA_DEVICE_KERNELS(DEVICE, TYPES)                             \
   REGISTER_KERNEL_BUILDER(Name("_Send").Device(DEVICE), SendOp);               \
   REGISTER_KERNEL_BUILDER(Name("_Recv").Device(DEVICE), RecvOp);               \
@@ -198,33 +209,33 @@ class XlaAssignVariableOp : public AsyncOpKernel {
                                                                                \
   REGISTER_KERNEL_BUILDER(                                                     \
       Name("GeneratorDataset").Device(DEVICE).HostMemory("handle"),            \
-      GeneratorDatasetOp);                                                     \
+      data::GeneratorDatasetOp);                                               \
   REGISTER_KERNEL_BUILDER(Name("PrefetchDataset")                              \
                               .Device(DEVICE)                                  \
                               .HostMemory("buffer_size")                       \
                               .HostMemory("input_dataset")                     \
                               .HostMemory("handle"),                           \
-                          PrefetchDatasetOp);                                  \
+                          data::PrefetchDatasetOp);                            \
                                                                                \
   REGISTER_KERNEL_BUILDER(Name("IteratorV2").Device(DEVICE),                   \
-                          IteratorHandleOp);                                   \
+                          data::IteratorHandleOp);                             \
   REGISTER_KERNEL_BUILDER(                                                     \
       Name("MakeIterator").Device(DEVICE).HostMemory("dataset"),               \
-      MakeIteratorOp);                                                         \
+      data::MakeIteratorOp);                                                   \
   REGISTER_KERNEL_BUILDER(Name("AnonymousIterator").Device(DEVICE),            \
-                          AnonymousIteratorHandleOp);                          \
+                          data::AnonymousIteratorHandleOp);                    \
   REGISTER_KERNEL_BUILDER(Name("IteratorGetNext").Device(DEVICE),              \
-                          IteratorGetNextOp);                                  \
+                          data::IteratorGetNextOp);                            \
   REGISTER_KERNEL_BUILDER(Name("IteratorGetNextSync").Device(DEVICE),          \
-                          IteratorGetNextSyncOp);                              \
+                          data::IteratorGetNextSyncOp);                        \
   REGISTER_KERNEL_BUILDER(Name("IteratorToStringHandle")                       \
                               .Device(DEVICE)                                  \
                               .HostMemory("string_handle"),                    \
-                          IteratorToStringHandleOp);                           \
+                          data::IteratorToStringHandleOp);                     \
   REGISTER_KERNEL_BUILDER(Name("IteratorFromStringHandleV2")                   \
                               .Device(DEVICE)                                  \
                               .HostMemory("string_handle"),                    \
-                          IteratorFromStringHandleOp);                         \
+                          data::IteratorFromStringHandleOp);                   \
   REGISTER_KERNEL_BUILDER(Name(FunctionLibraryDefinition::kArgOp)              \
                               .Device(DEVICE)                                  \
                               .HostMemory("output")                            \

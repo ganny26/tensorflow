@@ -76,54 +76,45 @@ bool IsInitializationOp(const Node* node) {
 namespace nodestats {
 inline int64 NowInNsec() { return Env::Default()->NowNanos(); }
 
-void SetScheduled(NodeExecStatsWrapper* stats, int64 micros) {
+void SetScheduled(NodeExecStatsInterface* stats, int64 micros) {
   if (!stats) return;
   stats->SetScheduled(micros * EnvTime::kMicrosToNanos);
 }
 
-void SetAllStart(NodeExecStatsWrapper* stats) {
+void SetAllStart(NodeExecStatsInterface* stats) {
   if (!stats) return;
   stats->RecordExecutorStarted();
 }
 
-void SetOpStart(NodeExecStatsWrapper* stats) {
+void SetOpStart(NodeExecStatsInterface* stats) {
   if (!stats) return;
   stats->RecordComputeStarted();
 }
 
-void SetOpEnd(NodeExecStatsWrapper* stats) {
+void SetOpEnd(NodeExecStatsInterface* stats) {
   if (!stats) return;
   stats->RecordComputeEnded();
 }
 
-void SetAllEnd(NodeExecStatsWrapper* stats) {
+void SetAllEnd(NodeExecStatsInterface* stats) {
   if (!stats) return;
   stats->RecordExecutorEnded();
 }
 
-void SetOutput(NodeExecStatsWrapper* stats, int slot, const Tensor* v) {
+void SetOutput(NodeExecStatsInterface* stats, int slot, const Tensor* v) {
   if (!stats) return;
   stats->SetOutput(slot, v);
 }
 
-void SetMemory(NodeExecStatsWrapper* stats, OpKernelContext* ctx) {
+void SetMemory(NodeExecStatsInterface* stats, OpKernelContext* ctx) {
   if (!stats) return;
   stats->SetMemory(ctx);
 }
 
-void SetReferencedTensors(NodeExecStatsWrapper* stats,
+void SetReferencedTensors(NodeExecStatsInterface* stats,
                           const TensorReferenceVector& tensors) {
   if (!stats) return;
   stats->SetReferencedTensors(tensors);
-}
-
-// Sets the timeline_label field of *stats, using data from *node.
-// Returns true iff the node is a transfer node.
-bool SetTimelineLabel(const Node* node, NodeExecStatsWrapper* stats) {
-  if (!stats) {
-    return false;
-  }
-  return stats->SetTimelineLabel(node);
 }
 
 }  // namespace nodestats
@@ -1301,7 +1292,7 @@ class ExecutorState {
 
   // After item->kernel computation is done, processes its outputs.
   Status ProcessOutputs(const NodeItem& item, OpKernelContext* ctx,
-                        EntryVector* outputs, NodeExecStatsWrapper* stats);
+                        EntryVector* outputs, NodeExecStatsInterface* stats);
 
   // After processing the outputs, propagates the outputs to their dsts.
   // Contents of *outputs are left in an indeterminate state after
@@ -1312,7 +1303,7 @@ class ExecutorState {
   // "node" just finishes. Takes ownership of "stats". Returns true if
   // execution has completed.
   bool NodeDone(const Status& s, const Node* node, const TaggedNodeSeq& ready,
-                NodeExecStatsWrapper* stats,
+                NodeExecStatsInterface* stats,
                 TaggedNodeReadyQueue* inline_ready);
 
   // Schedule all the expensive nodes in 'ready', and put all the inexpensive
@@ -1482,6 +1473,7 @@ void ExecutorState::RunAsync(Executor::DoneCallback done) {
   const Status fill_status =
       device->FillContextMap(graph, &device_context_map_);
   if (!fill_status.ok()) {
+    delete this;
     done(fill_status);
     return;
   }
@@ -1492,6 +1484,7 @@ void ExecutorState::RunAsync(Executor::DoneCallback done) {
     ready.push_back(TaggedNode{n, root_frame_, 0, false});
   }
   if (ready.empty()) {
+    delete this;
     done(Status::OK());
   } else {
     num_outstanding_ops_ = ready.size();
@@ -1511,7 +1504,7 @@ void ExecutorState::RunAsync(Executor::DoneCallback done) {
 struct ExecutorState::AsyncState {
   AsyncState(const OpKernelContext::Params& p, const TaggedNode& _tagged_node,
              const NodeItem* _item, Entry* _first_input,
-             NodeExecStatsWrapper* _stats)
+             NodeExecStatsInterface* _stats)
       : saved_inputs(*p.inputs),
         saved_input_device_contexts(*p.input_device_contexts),
         saved_input_alloc_attrs(*p.input_alloc_attrs),
@@ -1536,7 +1529,7 @@ struct ExecutorState::AsyncState {
   const NodeItem* item;
   Entry* first_input;
   OpKernelContext ctx;
-  NodeExecStatsWrapper* stats;
+  NodeExecStatsInterface* stats;
 
  private:
   OpKernelContext::Params* ParamsButClearingEigenGPUDevice(
@@ -1581,7 +1574,7 @@ void ExecutorState::Process(TaggedNode tagged_node, int64 scheduled_nsec) {
   params.stats_collector = stats_collector_;
 
   Status s;
-  NodeExecStatsWrapper* stats = nullptr;
+  NodeExecStatsInterface* stats = nullptr;
   EntryVector outputs;
   bool completed = false;
   inline_ready.push_back(tagged_node);
@@ -1611,7 +1604,7 @@ void ExecutorState::Process(TaggedNode tagged_node, int64 scheduled_nsec) {
     if (stats_collector_ && !tagged_node.is_dead) {
       // track allocations if and only if we are collecting statistics
       params.track_allocations = true;
-      stats = new NodeExecStatsWrapper(node->name());
+      stats = stats_collector_->CreateNodeExecStats(node);
       nodestats::SetScheduled(stats, scheduled_nsec);
       nodestats::SetAllStart(stats);
     }
@@ -1669,7 +1662,7 @@ void ExecutorState::Process(TaggedNode tagged_node, int64 scheduled_nsec) {
 
         auto done = [this, state]() {
           Device* device = impl_->params_.device;
-          NodeExecStatsWrapper* stats = state->stats;  // Shorthand
+          NodeExecStatsInterface* stats = state->stats;  // Shorthand
           Entry* first_input = state->first_input;     // Shorthand
 
           nodestats::SetOpEnd(stats);
@@ -1860,7 +1853,7 @@ Status ExecutorState::PrepareInputs(const NodeItem& item, Entry* first_input,
 
 Status ExecutorState::ProcessOutputs(const NodeItem& item, OpKernelContext* ctx,
                                      EntryVector* outputs,
-                                     NodeExecStatsWrapper* stats) {
+                                     NodeExecStatsInterface* stats) {
   const Node* node = item.node;
   DCHECK_EQ(0, outputs->size());
   outputs->resize(item.num_outputs);
@@ -2078,16 +2071,15 @@ void ExecutorState::PropagateOutputs(const TaggedNode& tagged_node,
 
 bool ExecutorState::NodeDone(const Status& s, const Node* node,
                              const TaggedNodeSeq& ready,
-                             NodeExecStatsWrapper* stats,
+                             NodeExecStatsInterface* stats,
                              TaggedNodeReadyQueue* inline_ready) {
   nodestats::SetAllEnd(stats);
-  if (stats_collector_ != nullptr &&
-      !nodestats::SetTimelineLabel(node, stats)) {
-    // Only record non-transfer nodes.
-    // Transfers 'stats' ownership to 'stats_collector_'.
-    stats_collector_->Save(impl_->params_.device->name(), stats);
-  } else if (stats) {
-    delete stats;
+  if (stats) {
+    if (stats_collector_) {
+      stats->Done(impl_->params_.device->name());
+    } else {
+      delete stats;
+    }
   }
 
   bool abort_run = false;
@@ -2309,13 +2301,15 @@ void ExecutorState::Finish() {
   auto done_cb = std::move(done_cb_);
   auto runner = std::move(runner_);
   mu_.unlock();
-  if (sync_on_finish_ && status.ok()) {
+  Device* device = impl_->params_.device;
+  if ((sync_on_finish_ && status.ok()) || device->RequiresSyncOnCompletion()) {
     // Block until the device has finished all queued operations. For
     // devices like GPUs that continue to execute Ops after their Compute
     // methods have completed, this ensures that control is not returned to
     // the user until the step (and its side-effects) has actually completed.
-    status = impl_->params_.device->Sync();
+    status.Update(device->Sync());
   }
+
   delete this;
   CHECK(done_cb != nullptr);
   runner([=]() { done_cb(status); });
@@ -2419,8 +2413,7 @@ void ExecutorState::DeleteFrame(FrameState* frame, TaggedNodeSeq* ready) {
         }
         if (dst_ready) {
           if (IsControlTrigger(dst_node)) dst_dead = false;
-          ready->push_back(
-              TaggedNode(dst_node, parent_frame, parent_iter, dst_dead));
+          ready->emplace_back(dst_node, parent_frame, parent_iter, dst_dead);
           parent_iter_state->outstanding_ops++;
         }
       }
@@ -2544,7 +2537,7 @@ void ExecutorState::FrameState::ActivateNodes(const NodeItem* item,
     // Add dst to the ready queue if it's ready
     if (dst_ready) {
       if (dst_item->is_control_trigger) dst_dead = false;
-      ready->push_back(TaggedNode(dst_item->node, this, iter, dst_dead));
+      ready->emplace_back(dst_item->node, this, iter, dst_dead);
       iter_state->outstanding_ops++;
     }
   }

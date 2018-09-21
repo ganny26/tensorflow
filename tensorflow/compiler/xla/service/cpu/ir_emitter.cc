@@ -100,12 +100,17 @@ IrEmitter::IrEmitter(
   b_.setFastMathFlags(llvm_ir::GetFastMathFlags(
       /*fast_math_enabled=*/hlo_module_config_.debug_options()
           .xla_cpu_enable_fast_math()));
+  Status s = GatherComputationsByAllocationType(
+      &hlo_module, &thread_local_computations_, &global_computations_);
+  absl::c_sort(thread_local_computations_);
+  absl::c_sort(global_computations_);
+  TF_CHECK_OK(s) << "Should have failed buffer assignment.";
 }
 
 StatusOr<llvm::Function*> IrEmitter::EmitComputation(
     HloComputation* computation, const string& function_name_prefix,
     bool is_top_level_computation,
-    std::vector<const HloInstruction*>* instruction_order) {
+    const std::vector<const HloInstruction*>* instruction_order) {
   string function_name = name_uniquer_.GetUniqueName(function_name_prefix);
   VLOG(2) << "Emitting IR for CPU function [" << function_name_prefix
           << "]; ordered? " << (instruction_order != nullptr);
@@ -337,10 +342,10 @@ Status IrEmitter::HandleInfeed(HloInstruction* instruction) {
   // Write the tuple index table.
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice data_slice,
                       assignment_.GetUniqueSlice(infeed, {0}));
-  llvm::Value* data_address = EmitTempBufferPointer(data_slice, data_shape);
+  llvm::Value* data_address = EmitBufferPointer(data_slice, data_shape);
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice token_slice,
                       assignment_.GetUniqueSlice(infeed, {1}));
-  llvm::Value* token_address = EmitTempBufferPointer(
+  llvm::Value* token_address = EmitBufferPointer(
       token_slice, ShapeUtil::GetTupleElementShape(infeed->shape(), 1));
   llvm_ir::EmitTuple(GetIrArrayFor(infeed), {data_address, token_address}, &b_,
                      module_);
@@ -363,9 +368,9 @@ Status IrEmitter::HandleInfeed(HloInstruction* instruction) {
       // Only the outer tuple buffer's target address is obtained from
       // GetEmittedValueFor, to handle the case when Infeed is the root
       // instruction. Target addresses for internal elements can be obtained
-      // from EmitTempBufferPointer.
+      // from EmitBufferPointer.
       llvm::Value* tuple_element_address =
-          EmitTempBufferPointer(buffer, tuple_element_shape);
+          EmitBufferPointer(buffer, tuple_element_shape);
 
       TF_RETURN_IF_ERROR(EmitXfeedTransfer(
           XfeedKind::kInfeed, tuple_element_shape, tuple_element_address));
@@ -490,8 +495,150 @@ Status IrEmitter::HandleOutfeed(HloInstruction* outfeed) {
 }
 
 Status IrEmitter::HandleSort(HloInstruction* sort) {
-  // TODO(b/26783907): Implement sort on CPU.
-  return Unimplemented("Sort is not implemented on CPU.");
+  TF_RETURN_IF_ERROR(EmitTargetAddressForOp(sort));
+  auto keys = sort->operand(0);
+  auto values = sort->operand_count() > 1 ? sort->operand(1) : nullptr;
+  ShapeIndex keys_shape_index({});
+  ShapeIndex values_shape_index({});
+  if (values != nullptr) {
+    keys_shape_index = ShapeIndex({0});
+    values_shape_index = ShapeIndex({1});
+  }
+  auto keys_destination = GetAllocationSlice(*sort, keys_shape_index);
+  auto keys_destination_address =
+      EmitBufferPointer(keys_destination, keys->shape());
+  auto values_destination = GetAllocationSlice(*sort, values_shape_index);
+  llvm::Value* values_destination_address = nullptr;
+
+  // The sort is implemented in-place, therefore we first copy the operand
+  // buffer to the output buffer if they are not the same.
+  if (keys_destination != GetAllocationSlice(*keys)) {
+    int64 primitive_type_size =
+        ShapeUtil::ByteSizeOfPrimitiveType(keys->shape().element_type());
+    auto source_buffer = GetEmittedValueFor(keys);
+    int64 keys_size = ByteSizeOf(keys->shape());
+    MemCpy(keys_destination_address, /*DstAlign=*/primitive_type_size,
+           source_buffer,
+           /*SrcAlign=*/primitive_type_size, keys_size);
+  }
+  if (values != nullptr) {
+    values_destination_address =
+        EmitBufferPointer(values_destination, values->shape());
+    if (values_destination != GetAllocationSlice(*values)) {
+      int64 primitive_type_size =
+          ShapeUtil::ByteSizeOfPrimitiveType(values->shape().element_type());
+      auto source_buffer = GetEmittedValueFor(values);
+      int64 values_size = ByteSizeOf(values->shape());
+      MemCpy(values_destination_address, /*DstAlign=*/primitive_type_size,
+             source_buffer,
+             /*SrcAlign=*/primitive_type_size, values_size);
+    }
+  }
+
+  // Normalize the shape and the dimension to sort.
+  Shape normalized_keys_shape =
+      ShapeUtil::MakeShapeWithDescendingLayoutAndSamePhysicalLayout(
+          keys->shape());
+  int64 physical_dimension_to_sort = LayoutUtil::MakeLogicalToPhysical(
+      keys->shape().layout())[sort->dimensions(0)];
+
+  int64 sort_dimension_elements =
+      normalized_keys_shape.dimensions(physical_dimension_to_sort);
+  int64 higher_dimensions = 1;
+  for (int64 i = 0; i < physical_dimension_to_sort; ++i) {
+    higher_dimensions *= normalized_keys_shape.dimensions(i);
+  }
+  int64 lower_dimensions = 1;
+  for (int64 i = ShapeUtil::Rank(normalized_keys_shape) - 1;
+       i > physical_dimension_to_sort; --i) {
+    lower_dimensions *= normalized_keys_shape.dimensions(i);
+  }
+
+  PrimitiveType keys_type = keys->shape().element_type();
+  const char* fn_name = nullptr;
+  llvm::Type* keys_native_type = nullptr;
+  switch (keys_type) {
+    case PRED:
+      fn_name = runtime::kKeyValueSortPREDSymbolName;
+      keys_native_type = b_.getInt8PtrTy();
+      break;
+    case S8:
+      fn_name = runtime::kKeyValueSortS8SymbolName;
+      keys_native_type = b_.getInt8PtrTy();
+      break;
+    case U8:
+      fn_name = runtime::kKeyValueSortU8SymbolName;
+      keys_native_type = b_.getInt8PtrTy();
+      break;
+    case S16:
+      fn_name = runtime::kKeyValueSortS16SymbolName;
+      keys_native_type = b_.getInt16Ty()->getPointerTo();
+      break;
+    case U16:
+      fn_name = runtime::kKeyValueSortU16SymbolName;
+      keys_native_type = b_.getInt16Ty()->getPointerTo();
+      break;
+    case F16:
+      fn_name = runtime::kKeyValueSortF16SymbolName;
+      keys_native_type = b_.getHalfTy()->getPointerTo();
+      break;
+    case S32:
+      fn_name = runtime::kKeyValueSortS32SymbolName;
+      keys_native_type = b_.getInt32Ty()->getPointerTo();
+      break;
+    case U32:
+      fn_name = runtime::kKeyValueSortU32SymbolName;
+      keys_native_type = b_.getInt32Ty()->getPointerTo();
+      break;
+    case F32:
+      fn_name = runtime::kKeyValueSortF32SymbolName;
+      keys_native_type = b_.getFloatTy()->getPointerTo();
+      break;
+    case S64:
+      fn_name = runtime::kKeyValueSortS64SymbolName;
+      keys_native_type = b_.getInt64Ty()->getPointerTo();
+      break;
+    case U64:
+      fn_name = runtime::kKeyValueSortU64SymbolName;
+      keys_native_type = b_.getInt64Ty()->getPointerTo();
+      break;
+    case F64:
+      fn_name = runtime::kKeyValueSortF64SymbolName;
+      keys_native_type = b_.getDoubleTy()->getPointerTo();
+      break;
+    default:
+      return Unimplemented(
+          "Element type %s not supported in the Sort op on CPU.",
+          PrimitiveType_Name(keys_type));
+  }
+
+  llvm::FunctionType* key_value_sort_type = llvm::FunctionType::get(
+      b_.getVoidTy(),
+      {keys_native_type, b_.getInt64Ty(), b_.getInt64Ty(), b_.getInt64Ty(),
+       b_.getInt8PtrTy(), b_.getInt32Ty()},
+      /*isVarArg=*/false);
+  auto* key_value_sort_func = llvm::cast<llvm::Function>(
+      module_->getOrInsertFunction(fn_name, key_value_sort_type));
+  key_value_sort_func->setCallingConv(llvm::CallingConv::C);
+  key_value_sort_func->setDoesNotThrow();
+  key_value_sort_func->setOnlyAccessesArgMemory();
+  Call(key_value_sort_func,
+       {PointerCast(keys_destination_address, keys_native_type),
+        b_.getInt64(higher_dimensions), b_.getInt64(sort_dimension_elements),
+        b_.getInt64(lower_dimensions),
+        values != nullptr
+            ? PointerCast(values_destination_address, b_.getInt8PtrTy())
+            : llvm::Constant::getNullValue(b_.getInt8PtrTy()),
+        b_.getInt32(values != nullptr ? ShapeUtil::ByteSizeOfPrimitiveType(
+                                            values->shape().element_type())
+                                      : 0)});
+
+  if (values != nullptr) {
+    llvm_ir::EmitTuple(GetIrArrayFor(sort),
+                       {keys_destination_address, values_destination_address},
+                       &b_, module_);
+  }
+  return Status::OK();
 }
 
 Status IrEmitter::HandleTuple(HloInstruction* tuple) {
@@ -1200,7 +1347,7 @@ Status IrEmitter::HandleCrossReplicaSum(HloInstruction* crs) {
     const Shape& operand_shape = crs->operand(i)->shape();
     CHECK(ShapeUtil::IsArray(operand_shape))
         << "Operands to cross-replica-sum must be arrays: " << crs->ToString();
-    operand_ptrs.push_back(EmitTempBufferPointer(out_slice, operand_shape));
+    operand_ptrs.push_back(EmitBufferPointer(out_slice, operand_shape));
 
     // TODO(b/63762267): Be more aggressive about specifying alignment.
     MemCpy(operand_ptrs.back(), /*DstAlign=*/1, in_ptr,
@@ -2097,7 +2244,7 @@ Status IrEmitter::HandleCall(HloInstruction* call) {
         {}, &b_, computation->name(),
         /*return_value_buffer=*/emitted_value_[call],
         /*exec_run_options_arg=*/GetExecutableRunOptionsArgument(),
-        /*temp_buffers_arg=*/GetTempBuffersArgument(),
+        /*buffer_table_arg=*/GetBufferTableArgument(),
         /*profile_counters_arg=*/GetProfileCountersArgument());
 
     HloInstruction* root = computation->root_instruction();
@@ -2617,15 +2764,15 @@ llvm::Value* IrEmitter::GetProfileCountersArgument() {
   return compute_function_->profile_counters_arg();
 }
 
-llvm::Value* IrEmitter::GetTempBuffersArgument() {
-  return compute_function_->temp_buffers_arg();
+llvm::Value* IrEmitter::GetBufferTableArgument() {
+  return compute_function_->buffer_table_arg();
 }
 
 llvm::Value* IrEmitter::GetExecutableRunOptionsArgument() {
   return compute_function_->exec_run_options_arg();
 }
 
-llvm::Value* IrEmitter::EmitThreadLocalTempBufferPointer(
+llvm::Value* IrEmitter::EmitThreadLocalBufferPointer(
     const BufferAllocation::Slice& slice, const Shape& target_shape) {
   const BufferAllocation& allocation = *slice.allocation();
   llvm::Value* tempbuf_address = [&]() -> llvm::Value* {
@@ -2684,11 +2831,11 @@ llvm::Value* IrEmitter::EmitThreadLocalTempBufferPointer(
   return BitCast(tempbuf_address, IrShapeType(target_shape)->getPointerTo());
 }
 
-llvm::Value* IrEmitter::EmitGlobalTempBufferPointer(
+llvm::Value* IrEmitter::EmitGlobalBufferPointer(
     const BufferAllocation::Slice& slice, const Shape& target_shape) {
   const BufferAllocation& allocation = *slice.allocation();
   llvm::Value* tempbuf_address_ptr = llvm_ir::EmitBufferIndexingGEP(
-      GetTempBuffersArgument(), slice.index(), &b_);
+      GetBufferTableArgument(), slice.index(), &b_);
   llvm::LoadInst* tempbuf_address_base = Load(tempbuf_address_ptr);
   if (hlo_module_config_.debug_options()
           .xla_llvm_enable_invariant_load_metadata()) {
@@ -2709,14 +2856,14 @@ llvm::Value* IrEmitter::EmitGlobalTempBufferPointer(
                  IrShapeType(target_shape)->getPointerTo());
 }
 
-llvm::Value* IrEmitter::EmitTempBufferPointer(
-    const BufferAllocation::Slice& slice, const Shape& target_shape) {
+llvm::Value* IrEmitter::EmitBufferPointer(const BufferAllocation::Slice& slice,
+                                          const Shape& target_shape) {
   if (slice.allocation()->is_thread_local()) {
-    return EmitThreadLocalTempBufferPointer(slice, target_shape);
+    return EmitThreadLocalBufferPointer(slice, target_shape);
   } else if (slice.allocation()->is_constant()) {
     return FindOrDie(constant_buffer_to_global_, slice.allocation()->index());
   } else {
-    return EmitGlobalTempBufferPointer(slice, target_shape);
+    return EmitGlobalBufferPointer(slice, target_shape);
   }
 }
 
@@ -2724,7 +2871,7 @@ Status IrEmitter::EmitTargetAddressForOp(const HloInstruction* op) {
   const Shape& target_shape = op->shape();
   TF_ASSIGN_OR_RETURN(const BufferAllocation::Slice slice,
                       assignment_.GetUniqueTopLevelSlice(op));
-  llvm::Value* addr = EmitTempBufferPointer(slice, target_shape);
+  llvm::Value* addr = EmitBufferPointer(slice, target_shape);
   addr->setName(AsStringRef(IrName(op)));
   emitted_value_[op] = addr;
   return Status::OK();
@@ -2753,8 +2900,7 @@ Status IrEmitter::EmitTargetElementLoop(
       TF_ASSIGN_OR_RETURN(BufferAllocation::Slice slice,
                           assignment_.GetUniqueSlice(target_op, {i}));
       const Shape& element_shape = ShapeUtil::GetSubshape(target_shape, {i});
-      llvm::Value* op_target_address =
-          EmitTempBufferPointer(slice, element_shape);
+      llvm::Value* op_target_address = EmitBufferPointer(slice, element_shape);
       output_arrays.push_back(
           llvm_ir::IrArray(op_target_address, element_shape));
     }
@@ -2832,6 +2978,8 @@ Status IrEmitter::DefaultAction(HloInstruction* hlo) {
 llvm::Value* IrEmitter::EmitThreadLocalCall(
     const HloComputation& callee, absl::Span<llvm::Value* const> parameters,
     absl::string_view name) {
+  CHECK(absl::c_binary_search(thread_local_computations_, &callee));
+
   const Shape& return_shape = callee.root_instruction()->shape();
 
   // Lifting this restriction to allow "small" arrays should be easy.  Allowing
@@ -2860,7 +3008,7 @@ llvm::Value* IrEmitter::EmitThreadLocalCall(
            parameter_addrs, &b_, name,
            /*return_value_buffer=*/return_value_buffer,
            /*exec_run_options_arg=*/GetExecutableRunOptionsArgument(),
-           /*temp_buffers_arg=*/
+           /*buffer_table_arg=*/
            llvm::Constant::getNullValue(b_.getInt8PtrTy()->getPointerTo()),
            /*profile_counters_arg=*/GetProfileCountersArgument()));
 
@@ -2869,13 +3017,15 @@ llvm::Value* IrEmitter::EmitThreadLocalCall(
 
 void IrEmitter::EmitGlobalCall(const HloComputation& callee,
                                absl::string_view name) {
+  CHECK(absl::c_binary_search(global_computations_, &callee));
+
   Call(FindOrDie(emitted_functions_, &callee),
        GetArrayFunctionCallArguments(
            /*parameter_addresses=*/{}, &b_, name,
            /*return_value_buffer=*/
            llvm::Constant::getNullValue(b_.getInt8PtrTy()),
            /*exec_run_options_arg=*/GetExecutableRunOptionsArgument(),
-           /*temp_buffers_arg=*/GetTempBuffersArgument(),
+           /*buffer_table_arg=*/GetBufferTableArgument(),
            /*profile_counters_arg=*/GetProfileCountersArgument()));
 }
 
@@ -2888,7 +3038,7 @@ llvm::Value* IrEmitter::GetBufferForGlobalCallReturnValue(
 
   const BufferAllocation::Slice root_buffer =
       assignment_.GetUniqueTopLevelSlice(root_inst).ValueOrDie();
-  return EmitTempBufferPointer(root_buffer, root_inst->shape());
+  return EmitBufferPointer(root_buffer, root_inst->shape());
 }
 
 }  // namespace cpu

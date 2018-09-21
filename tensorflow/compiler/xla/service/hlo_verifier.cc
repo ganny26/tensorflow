@@ -86,8 +86,8 @@ Status ShapeVerifier::HandleConvolution(HloInstruction* convolution) {
       const Shape expected,
       ShapeInference::InferConvolveShape(
           convolution->operand(0)->shape(), convolution->operand(1)->shape(),
-          convolution->window(), convolution->convolution_dimension_numbers(),
-          convolution->feature_group_count()));
+          convolution->feature_group_count(), convolution->window(),
+          convolution->convolution_dimension_numbers()));
   return CheckShape(convolution, expected);
 }
 
@@ -1057,6 +1057,7 @@ Status VerifySendsAndRecvs(const HloModule& module) {
 }  // namespace
 
 StatusOr<bool> HloVerifier::Run(HloModule* module) {
+  TF_RET_CHECK(!module->name().empty());
   TF_RETURN_IF_ERROR(VerifyHloStructure(module));
   TF_RETURN_IF_ERROR(VerifySendsAndRecvs(*module));
 
@@ -1122,6 +1123,11 @@ StatusOr<bool> HloVerifier::Run(HloModule* module) {
   }
 
   TF_RETURN_IF_ERROR(VerifyEntryAndExitShapes(*module));
+
+  // If the module has a schedule, it must be valid.
+  if (module->has_schedule()) {
+    TF_RETURN_IF_ERROR(module->schedule().Verify());
+  }
 
   return false;
 }

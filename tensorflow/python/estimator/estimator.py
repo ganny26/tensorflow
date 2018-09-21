@@ -35,18 +35,15 @@ from tensorflow.python.estimator import model_fn as model_fn_lib
 from tensorflow.python.estimator import run_config
 from tensorflow.python.estimator import util as estimator_util
 from tensorflow.python.estimator.export import export as export_helpers
-from tensorflow.python.estimator.export import export_output
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import random_seed
 from tensorflow.python.framework import tensor_util
-from tensorflow.python.keras import metrics
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import metrics as metrics_lib
-from tensorflow.python.ops import resources
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import gfile
 from tensorflow.python.platform import tf_logging as logging
@@ -331,7 +328,7 @@ class Estimator(object):
                                  run_config.TaskType.PS):
       raise ValueError(
           'Train has been called wrong configuration. Please use '
-          'tf.estimator.train_and_evaluate which calls propper API according '
+          'tf.estimator.train_and_evaluate which calls proper API according '
           'to given configuration. Current configuration: {}.'.format(
               self.config))
 
@@ -491,6 +488,10 @@ class Estimator(object):
               checkpoint_path=None,
               yield_single_examples=True):
     """Yields predictions for given features.
+
+    Please note that interleaving two predict outputs does not work. See:
+    [issue/20506](
+    https://github.com/tensorflow/tensorflow/issues/20506#issuecomment-422208517)
 
     Args:
       input_fn: A function that constructs the features. Prediction continues
@@ -958,7 +959,12 @@ class Estimator(object):
           mode=mode,
           config=self.config)
 
-      export_outputs = self._get_export_outputs_for_spec(estimator_spec)
+      export_outputs = model_fn_lib.export_outputs_for_mode(
+          mode=estimator_spec.mode,
+          serving_export_outputs=estimator_spec.export_outputs,
+          predictions=estimator_spec.predictions,
+          loss=estimator_spec.loss,
+          metrics=estimator_spec.eval_metric_ops)
 
       # Build the SignatureDefs from receivers and all outputs
       signature_def_map = export_helpers.build_all_signature_defs(
@@ -1014,45 +1020,6 @@ class Estimator(object):
               session, **meta_graph_kwargs)
         else:
           builder.add_meta_graph(**meta_graph_kwargs)
-
-  def _get_export_outputs_for_spec(self, estimator_spec):
-    """Given an `EstimatorSpec`, determine what our export outputs should be.
-
-    `EstimatorSpecs` contains `export_outputs` that are used for serving, but
-    for
-    training and eval graphs, we must wrap the tensors of interest in
-    appropriate `tf.estimator.export.ExportOutput` objects.
-
-    Args:
-      estimator_spec: `tf.estimator.EstimatorSpec` object that will be exported.
-
-    Returns:
-      a dict mapping `export_output_name` to `tf.estimator.export.ExportOutput`
-      object.
-
-    Raises:
-      ValueError: if an appropriate `ExportOutput` cannot be found for the
-        passed `EstimatorSpec.mode`
-    """
-    mode = estimator_spec.mode
-    if mode == model_fn_lib.ModeKeys.PREDICT:
-      outputs = estimator_spec.export_outputs
-    else:
-      if mode == model_fn_lib.ModeKeys.TRAIN:
-        output_class = export_output.TrainOutput
-      elif mode == model_fn_lib.ModeKeys.EVAL:
-        output_class = export_output.EvalOutput
-      else:
-        raise ValueError(
-            'Export output type not found for mode: {}'.format(mode))
-
-      export_out = output_class(
-          loss=estimator_spec.loss,
-          predictions=estimator_spec.predictions,
-          metrics=estimator_spec.eval_metric_ops)
-      outputs = {mode: export_out}
-
-    return outputs
 
   def _get_features_from_input_fn(self, input_fn, mode):
     """Extracts the `features` from return values of `input_fn`."""
@@ -1644,21 +1611,6 @@ def maybe_overwrite_model_dir_and_session_config(config, model_dir):
   return config
 
 
-def create_per_tower_ready_op(scaffold):
-  """Create a `tf.train.Scaffold.ready_op` inside a tower."""
-  if scaffold.ready_op:
-    return scaffold.ready_op
-
-  def default_ready_op():
-    return array_ops.concat([
-        variables.report_uninitialized_variables(),
-        resources.report_uninitialized_resources()
-    ], 0)
-
-  return monitored_session.Scaffold.get_or_default(
-      'ready_op', ops.GraphKeys.READY_OP, default_ready_op)
-
-
 def create_per_tower_ready_for_local_init_op(scaffold):
   """Create a `tf.train.Scaffold.ready_for_local_init_op` inside a tower."""
   if scaffold.ready_for_local_init_op:
@@ -1704,15 +1656,13 @@ def _combine_distributed_scaffold(grouped_scaffold, distribution):
   def _unwrap_and_concat(value):
     value = nest.flatten(distribution.unwrap(value))
     if len(value) != 1:
-      return array_ops.concat(value)
+      return array_ops.concat(value, 0)
     return value[0]
 
   ready_op = distribution.call_for_each_tower(
-      create_per_tower_ready_op, grouped_scaffold)
+      lambda scaffold: scaffold.ready_op, grouped_scaffold)
   if ready_op is not None:
     ready_op = _unwrap_and_concat(ready_op)
-  else:
-    ready_op = None
 
   ready_for_local_init_op = distribution.call_for_each_tower(
       create_per_tower_ready_for_local_init_op, grouped_scaffold)
@@ -1841,18 +1791,9 @@ def _extract_metric_update_ops(eval_dict, distribution=None):
   value_ops = {}
   # Sort metrics lexicographically so graph is identical every time.
   for name, value in sorted(six.iteritems(eval_dict)):
-    if isinstance(value, metrics.Metric):
-      metric_result = value.result()
-      # We expect only one update op for every metric when there is no
-      # distribution strategy.
-      metric_update = value.updates if distribution else value.updates[0]
-    else:
-      metric_result = value[0]
-      metric_update = value[1]
-
-    value_ops[name] = metric_result
+    value_ops[name] = value[0]
     update_ops.append(
-        distribution.group(metric_update) if distribution else metric_update)
+        distribution.group(value[1]) if distribution else value[1])
 
   update_op = control_flow_ops.group(*update_ops) if update_ops else None
   return update_op, value_ops
@@ -2109,7 +2050,7 @@ class WarmStartSettings(
     var_name_to_vocab_info: [Optional] Dict of variable names (strings) to
       `tf.estimator.VocabInfo`. The variable names should be "full" variables,
       not the names of the partitions.  If not explicitly provided, the variable
-      is assumed to have no vocabulary.
+      is assumed to have no (changes to) vocabulary.
     var_name_to_prev_var_name: [Optional] Dict of variable names (strings) to
       name of the previously-trained variable in `ckpt_to_initialize_from`. If
       not explicitly provided, the name of the variable is assumed to be same
